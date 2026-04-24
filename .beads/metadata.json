@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "nota_serde_core",
+  "project_id": "5168e700-33e8-4b15-b0a9-1b335733858b"
+}

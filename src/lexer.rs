@@ -66,6 +66,8 @@ pub enum Token {
     RParenDouble, // ||) (optional pattern close)
     LBraceDouble, // {|| (atomic transaction open)
     RBraceDouble, // ||} (atomic transaction close)
+    LAngleDouble, // <|| (windowed stream open, Phase 2 reserved)
+    RAngleDouble, // ||> (windowed stream close, Phase 2 reserved)
 }
 
 pub struct Lexer<'a> {
@@ -210,21 +212,26 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// `<` → `LAngle`, `<|` → `LAnglePipe` (nexus-only).
+    /// `<` → `LAngle`, `<|` → `LAnglePipe`, `<||` → `LAngleDouble`
+    /// (the piped forms nexus-only).
     fn read_left_angle(&mut self) -> Token {
         self.pos += 1;
-        if self.dialect == Dialect::Nexus && self.peek_byte() == Some(b'|') {
+        if self.dialect != Dialect::Nexus || self.peek_byte() != Some(b'|') {
+            return Token::LAngle;
+        }
+        self.pos += 1;
+        if self.peek_byte() == Some(b'|') {
             self.pos += 1;
-            Token::LAnglePipe
+            Token::LAngleDouble
         } else {
-            Token::LAngle
+            Token::LAnglePipe
         }
     }
 
     /// Decode a leading `|` into its closing-pair token. Nexus-only.
     ///
     /// Single-pipe closers: `|)`, `|}`, `|>`.
-    /// Double-pipe closers: `||)`, `||}`.
+    /// Double-pipe closers: `||)`, `||}`, `||>`.
     fn read_pipe_close(&mut self) -> Result<Token> {
         self.pos += 1;
         if self.peek_byte() == Some(b'|') {
@@ -233,8 +240,9 @@ impl<'a> Lexer<'a> {
             match tail {
                 Some(b')') => { self.pos += 2; Ok(Token::RParenDouble) }
                 Some(b'}') => { self.pos += 2; Ok(Token::RBraceDouble) }
+                Some(b'>') => { self.pos += 2; Ok(Token::RAngleDouble) }
                 Some(other) => Err(Error::Custom(format!(
-                    "unexpected `||` followed by {:?} — expected `||)` or `||}}`",
+                    "unexpected `||` followed by {:?} — expected `||)`, `||}}` or `||>`",
                     other as char
                 ))),
                 None => Err(Error::Custom("unexpected `||` at end of input".into())),
@@ -245,7 +253,7 @@ impl<'a> Lexer<'a> {
                 Some(b'}') => { self.pos += 1; Ok(Token::RBracePipe) }
                 Some(b'>') => { self.pos += 1; Ok(Token::RAnglePipe) }
                 Some(other) => Err(Error::Custom(format!(
-                    "unexpected `|` followed by {:?} — expected `|)`, `|}}`, `|>`, `||)` or `||}}`",
+                    "unexpected `|` followed by {:?} — expected `|)`, `|}}`, `|>`, `||)`, `||}}` or `||>`",
                     other as char
                 ))),
                 None => Err(Error::Custom("unexpected `|` at end of input".into())),

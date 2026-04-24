@@ -112,6 +112,22 @@ mod lexer_tier1 {
     }
 
     #[test]
+    fn windowed_stream_delim() {
+        assert_eq!(
+            lex_nexus("<|| ||>"),
+            vec![Token::LAngleDouble, Token::RAngleDouble]
+        );
+    }
+
+    #[test]
+    fn windowed_stream_disambiguates_from_single() {
+        assert_eq!(lex_nexus("<|"), vec![Token::LAnglePipe]);
+        assert_eq!(lex_nexus("<||"), vec![Token::LAngleDouble]);
+        assert_eq!(lex_nexus("|>"), vec![Token::RAnglePipe]);
+        assert_eq!(lex_nexus("||>"), vec![Token::RAngleDouble]);
+    }
+
+    #[test]
     fn tier1_vs_non_tier1_disambiguates() {
         // `(|` is pattern; `(||` is optional pattern. Grammar must pick
         // the double-pipe form when the second `|` is present.

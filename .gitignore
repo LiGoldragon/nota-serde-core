@@ -1,0 +1,11 @@
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+.direnv/
+result
+result-*
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

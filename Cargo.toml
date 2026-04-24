@@ -1,0 +1,12 @@
+[package]
+name         = "nota-serde-core"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.85"
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/LiGoldragon/nota-serde-core"
+description  = "Shared kernel for nota-serde and nexus-serde: Lexer, Token, Error, Serializer, Deserializer over nota syntax"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

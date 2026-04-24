@@ -1,0 +1,6 @@
+[toolchain]
+# Matches the flake's `fenix.packages.${system}.stable` — both track
+# latest stable. Pin a specific version only at release time.
+channel = "stable"
+components = ["cargo", "rustc", "rustfmt", "clippy", "rust-analyzer", "rust-src"]
+profile = "default"

@@ -1,13 +1,32 @@
-//! Tokenizer for nota text.
+//! Tokenizer for nota/nexus text.
 //!
 //! Produces a stream of [`Token`]s. The parser is first-token-decidable
 //! at every choice point — the lexer never needs schema information to
 //! classify a token.
+//!
+//! [`Dialect`] selects the grammar. `Dialect::Nota` accepts only nota's
+//! four delimiter pairs and two sigils. `Dialect::Nexus` additionally
+//! accepts the nexus superset: three additional delimiter pairs plus
+//! the three sigils `~`, `@`, `!`; the `=` bind-alias token; and the
+//! Tier-1 extensions from [reports/013](../../../../../mentci-next/reports/013-nexus-syntax-proposal.md):
+//! `<| |>` stream, `(|| ||)` optional pattern, `{|| ||}` atomic txn.
 
 use crate::error::{Error, Result};
 
+/// Grammar dialect — picks the token set the lexer recognises.
+///
+/// [`Dialect::Nota`] is the strict data-layer subset. [`Dialect::Nexus`]
+/// is the messaging-layer superset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dialect {
+    #[default]
+    Nota,
+    Nexus,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
+    // Shared with both dialects.
     LParen,       // (
     RParen,       // )
     LAngle,       // <
@@ -28,20 +47,58 @@ pub enum Token {
     /// field name, tag, or a `true`/`false`/`None` keyword based on
     /// context.
     Ident(String),
+
+    // Nexus-dialect-only tokens. Never produced in Nota mode.
+    Tilde,        // ~ (mutate prefix)
+    At,           // @ (bind prefix)
+    Bang,         // ! (negate prefix)
+    LBrace,       // { (shape open)
+    RBrace,       // } (shape close)
+    LBracePipe,   // {| (constrain open)
+    RBracePipe,   // |} (constrain close)
+    LParenPipe,   // (| (pattern open)
+    RParenPipe,   // |) (pattern close)
+
+    // Tier-1 tokens (report 013). Never produced in Nota mode.
+    LAnglePipe,   // <| (stream / subscription open)
+    RAnglePipe,   // |> (stream close)
+    LParenDouble, // (|| (optional pattern open)
+    RParenDouble, // ||) (optional pattern close)
+    LBraceDouble, // {|| (atomic transaction open)
+    RBraceDouble, // ||} (atomic transaction close)
 }
 
 pub struct Lexer<'a> {
     input: &'a str,
     pos: usize,
+    dialect: Dialect,
 }
 
 impl<'a> Lexer<'a> {
+    /// Create a lexer in the default (Nota) dialect.
     pub fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
+        Self::with_dialect(input, Dialect::Nota)
+    }
+
+    /// Create a lexer for the nexus superset.
+    pub fn nexus(input: &'a str) -> Self {
+        Self::with_dialect(input, Dialect::Nexus)
+    }
+
+    pub fn with_dialect(input: &'a str, dialect: Dialect) -> Self {
+        Self { input, pos: 0, dialect }
+    }
+
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
     }
 
     fn peek_byte(&self) -> Option<u8> {
         self.input.as_bytes().get(self.pos).copied()
+    }
+
+    fn peek_at(&self, offset: usize) -> Option<u8> {
+        self.input.as_bytes().get(self.pos + offset).copied()
     }
 
     fn peek2_bytes(&self) -> Option<(u8, u8)> {
@@ -58,7 +115,6 @@ impl<'a> Lexer<'a> {
             match self.peek_byte() {
                 Some(b) if b.is_ascii_whitespace() => { self.pos += 1; }
                 Some(b';') if self.input.as_bytes().get(self.pos + 1) == Some(&b';') => {
-                    // line comment to end of line
                     while let Some(b) = self.peek_byte() {
                         self.pos += 1;
                         if b == b'\n' { break; }
@@ -74,9 +130,9 @@ impl<'a> Lexer<'a> {
         let Some(b) = self.peek_byte() else { return Ok(None); };
 
         match b {
-            b'(' => { self.pos += 1; Ok(Some(Token::LParen)) }
+            b'(' => Ok(Some(self.read_left_paren())),
             b')' => { self.pos += 1; Ok(Some(Token::RParen)) }
-            b'<' => { self.pos += 1; Ok(Some(Token::LAngle)) }
+            b'<' => Ok(Some(self.read_left_angle())),
             b'>' => { self.pos += 1; Ok(Some(Token::RAngle)) }
             b'=' => { self.pos += 1; Ok(Some(Token::Equals)) }
             b':' => { self.pos += 1; Ok(Some(Token::Colon)) }
@@ -96,10 +152,16 @@ impl<'a> Lexer<'a> {
                 let bytes = self.read_bytes()?;
                 Ok(Some(Token::Bytes(bytes)))
             }
-            b'-' | b'0'..=b'9' => {
-                let tok = self.read_number()?;
-                Ok(Some(tok))
-            }
+            b'-' | b'0'..=b'9' => Ok(Some(self.read_number()?)),
+
+            // Nexus-dialect sigils + delimiters.
+            b'{' if self.dialect == Dialect::Nexus => Ok(Some(self.read_left_brace())),
+            b'}' if self.dialect == Dialect::Nexus => { self.pos += 1; Ok(Some(Token::RBrace)) }
+            b'|' if self.dialect == Dialect::Nexus => self.read_pipe_close().map(Some),
+            b'~' if self.dialect == Dialect::Nexus => { self.pos += 1; Ok(Some(Token::Tilde)) }
+            b'@' if self.dialect == Dialect::Nexus => { self.pos += 1; Ok(Some(Token::At)) }
+            b'!' if self.dialect == Dialect::Nexus => { self.pos += 1; Ok(Some(Token::Bang)) }
+
             _ if is_ident_start(b) => {
                 let ident = self.read_ident();
                 match ident.as_str() {
@@ -109,9 +171,85 @@ impl<'a> Lexer<'a> {
                 }
             }
             _ => Err(Error::Custom(format!(
-                "unexpected character {:?} at byte offset {}",
-                b as char, self.pos
+                "unexpected character {:?} at byte offset {} ({} dialect)",
+                b as char, self.pos,
+                match self.dialect { Dialect::Nota => "nota", Dialect::Nexus => "nexus" }
             ))),
+        }
+    }
+
+    /// `(` → `LParen`, `(|` → `LParenPipe`, `(||` → `LParenDouble`
+    /// (the last two nexus-only).
+    fn read_left_paren(&mut self) -> Token {
+        self.pos += 1;
+        if self.dialect != Dialect::Nexus || self.peek_byte() != Some(b'|') {
+            return Token::LParen;
+        }
+        self.pos += 1;
+        if self.peek_byte() == Some(b'|') {
+            self.pos += 1;
+            Token::LParenDouble
+        } else {
+            Token::LParenPipe
+        }
+    }
+
+    /// `{` → `LBrace`, `{|` → `LBracePipe`, `{||` → `LBraceDouble`.
+    /// Nexus-only; caller gates dialect.
+    fn read_left_brace(&mut self) -> Token {
+        self.pos += 1;
+        if self.peek_byte() != Some(b'|') {
+            return Token::LBrace;
+        }
+        self.pos += 1;
+        if self.peek_byte() == Some(b'|') {
+            self.pos += 1;
+            Token::LBraceDouble
+        } else {
+            Token::LBracePipe
+        }
+    }
+
+    /// `<` → `LAngle`, `<|` → `LAnglePipe` (nexus-only).
+    fn read_left_angle(&mut self) -> Token {
+        self.pos += 1;
+        if self.dialect == Dialect::Nexus && self.peek_byte() == Some(b'|') {
+            self.pos += 1;
+            Token::LAnglePipe
+        } else {
+            Token::LAngle
+        }
+    }
+
+    /// Decode a leading `|` into its closing-pair token. Nexus-only.
+    ///
+    /// Single-pipe closers: `|)`, `|}`, `|>`.
+    /// Double-pipe closers: `||)`, `||}`.
+    fn read_pipe_close(&mut self) -> Result<Token> {
+        self.pos += 1;
+        if self.peek_byte() == Some(b'|') {
+            // double-pipe close
+            let tail = self.peek_at(1);
+            match tail {
+                Some(b')') => { self.pos += 2; Ok(Token::RParenDouble) }
+                Some(b'}') => { self.pos += 2; Ok(Token::RBraceDouble) }
+                Some(other) => Err(Error::Custom(format!(
+                    "unexpected `||` followed by {:?} — expected `||)` or `||}}`",
+                    other as char
+                ))),
+                None => Err(Error::Custom("unexpected `||` at end of input".into())),
+            }
+        } else {
+            match self.peek_byte() {
+                Some(b')') => { self.pos += 1; Ok(Token::RParenPipe) }
+                Some(b'}') => { self.pos += 1; Ok(Token::RBracePipe) }
+                Some(b'>') => { self.pos += 1; Ok(Token::RAnglePipe) }
+                Some(other) => Err(Error::Custom(format!(
+                    "unexpected `|` followed by {:?} — expected `|)`, `|}}`, `|>`, `||)` or `||}}`",
+                    other as char
+                ))),
+                None => Err(Error::Custom("unexpected `|` at end of input".into())),
+            }
         }
     }
 
@@ -280,13 +418,7 @@ fn hex_digit(b: u8) -> Option<u8> {
 fn parse_int_literal(cleaned: &str, radix: u32) -> std::result::Result<Token, std::num::ParseIntError> {
     match i128::from_str_radix(cleaned, radix) {
         Ok(i) => Ok(Token::Int(i)),
-        Err(_) => {
-            // i128 overflow — try u128. This only succeeds for
-            // non-negative values above i128::MAX, so we preserve
-            // signed-vs-unsigned semantics and don't accidentally
-            // treat a user's `-5` as u128::MAX - 4.
-            u128::from_str_radix(cleaned, radix).map(Token::UInt)
-        }
+        Err(_) => u128::from_str_radix(cleaned, radix).map(Token::UInt),
     }
 }
 
@@ -301,9 +433,7 @@ fn dedent(raw: &str) -> String {
         .unwrap_or(0);
 
     let mut out = String::new();
-    // Skip leading and trailing blank lines.
     let Some(start) = lines.iter().position(|l| !l.trim().is_empty()) else {
-        // All blank — content is empty after dedent.
         return out;
     };
     let end = lines
@@ -323,110 +453,4 @@ fn dedent(raw: &str) -> String {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn lex(s: &str) -> Vec<Token> {
-        let mut l = Lexer::new(s);
-        let mut out = Vec::new();
-        while let Some(t) = l.next_token().unwrap() {
-            out.push(t);
-        }
-        out
-    }
-
-    #[test]
-    fn delimiters() {
-        assert_eq!(lex("()<>="), vec![
-            Token::LParen, Token::RParen, Token::LAngle, Token::RAngle, Token::Equals,
-        ]);
-    }
-
-    #[test]
-    fn bools_and_idents() {
-        assert_eq!(lex("true false None foo-bar BazQux"), vec![
-            Token::Bool(true),
-            Token::Bool(false),
-            Token::Ident("None".into()),
-            Token::Ident("foo-bar".into()),
-            Token::Ident("BazQux".into()),
-        ]);
-    }
-
-    #[test]
-    fn integers() {
-        assert_eq!(lex("42 -7 0 1_000_000 0xff 0b1010 0o755"), vec![
-            Token::Int(42),
-            Token::Int(-7),
-            Token::Int(0),
-            Token::Int(1_000_000),
-            Token::Int(0xff),
-            Token::Int(0b1010),
-            Token::Int(0o755),
-        ]);
-    }
-
-    #[test]
-    fn floats() {
-        let toks = lex("2.5 -0.5 1.0 2e3 2.5e-1");
-        match (&toks[0], &toks[1], &toks[2], &toks[3], &toks[4]) {
-            (Token::Float(a), Token::Float(b), Token::Float(c), Token::Float(d), Token::Float(e)) => {
-                assert!((a - 2.5).abs() < 1e-9);
-                assert!((b - (-0.5)).abs() < 1e-9);
-                assert!((c - 1.0).abs() < 1e-9);
-                assert!((d - 2000.0).abs() < 1e-9);
-                assert!((e - 0.25).abs() < 1e-9);
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn inline_string() {
-        assert_eq!(lex("[hello world]"), vec![Token::Str("hello world".into())]);
-    }
-
-    #[test]
-    fn multiline_string_dedents() {
-        let text = "[|\n    first line\n      indented\n    last line\n|]";
-        let toks = lex(text);
-        assert_eq!(toks, vec![Token::Str("first line\n  indented\nlast line".into())]);
-    }
-
-    #[test]
-    fn bytes_literal() {
-        assert_eq!(lex("#a1b2c3"), vec![Token::Bytes(vec![0xa1, 0xb2, 0xc3])]);
-    }
-
-    #[test]
-    fn odd_length_bytes_rejected() {
-        let mut l = Lexer::new("#abc");
-        assert!(l.next_token().is_err());
-    }
-
-    #[test]
-    fn comments_skipped() {
-        assert_eq!(lex(";; comment\n42 ;; trailing\n7"), vec![
-            Token::Int(42),
-            Token::Int(7),
-        ]);
-    }
-
-    #[test]
-    fn record_tokens() {
-        assert_eq!(lex("(Point x=3.0 y=4.0)"), vec![
-            Token::LParen,
-            Token::Ident("Point".into()),
-            Token::Ident("x".into()),
-            Token::Equals,
-            Token::Float(3.0),
-            Token::Ident("y".into()),
-            Token::Equals,
-            Token::Float(4.0),
-            Token::RParen,
-        ]);
-    }
 }

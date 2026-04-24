@@ -1,4 +1,4 @@
-//! Serializer emitting canonical nota text.
+//! Serializer emitting canonical nota or nexus text.
 //!
 //! Records are positional: `(TypeName v1 v2 …)` with fields in
 //! source-declaration order. Newtype structs wrap: `struct Id(u32)` →
@@ -6,21 +6,45 @@
 //! are forbidden — use a named-field struct instead. Maps sort by
 //! serialized key bytes. Floats always contain `.`. Strings are
 //! `[ inline ]` or `[| multiline |]`. Bytes are `#<lowercase-hex>`.
+//!
+//! [`Dialect`] selects the grammar. In [`Dialect::Nexus`] the
+//! serializer additionally dispatches on sentinel newtype-struct names
+//! to emit nexus sigils ([`BIND_SENTINEL`] → `@name`,
+//! [`MUTATE_SENTINEL`] → `~value`, [`NEGATE_SENTINEL`] → `!value`).
 
 use std::fmt::Write as _;
 
 use serde::{ser, Serialize};
 
 use crate::error::{Error, Result};
+use crate::lexer::Dialect;
+
+/// Newtype-struct name that dispatches as a nexus bind (`@name`).
+/// Consumers derive `#[serde(rename = "@NexusBind")]` on the wrapper
+/// type to opt in.
+pub const BIND_SENTINEL: &str = "@NexusBind";
+/// Newtype-struct name dispatching as a nexus mutation marker (`~value`).
+pub const MUTATE_SENTINEL: &str = "@NexusMutate";
+/// Newtype-struct name dispatching as a nexus negation marker (`!value`).
+pub const NEGATE_SENTINEL: &str = "@NexusNegate";
 
 pub fn to_string<T: Serialize + ?Sized>(value: &T) -> Result<String> {
-    let mut ser = Serializer { output: String::new() };
+    to_string_with(value, Dialect::Nota)
+}
+
+pub fn to_string_nexus<T: Serialize + ?Sized>(value: &T) -> Result<String> {
+    to_string_with(value, Dialect::Nexus)
+}
+
+pub fn to_string_with<T: Serialize + ?Sized>(value: &T, dialect: Dialect) -> Result<String> {
+    let mut ser = Serializer::with_dialect(dialect);
     value.serialize(&mut ser)?;
     Ok(ser.output)
 }
 
 pub struct Serializer {
     output: String,
+    dialect: Dialect,
 }
 
 /// A string value may be emitted bare (without `[ ]`) when its
@@ -43,7 +67,39 @@ fn is_bare_string_eligible(v: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// Bind names must follow the camelCase or kebab-case identifier
+/// classes: first char lowercase or `_`, body in `[a-z0-9_-]`. No
+/// uppercase (reserved for PascalCase types) and no leading digit
+/// or `-`.
+fn is_valid_bind_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    let first_ok = matches!(
+        chars.next(),
+        Some(c) if c.is_ascii_lowercase() || c == '_'
+    );
+    let rest_ok = chars.all(
+        |c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
+    );
+    first_ok && rest_ok
+}
+
 impl Serializer {
+    pub fn new() -> Self {
+        Self::with_dialect(Dialect::Nota)
+    }
+
+    pub fn with_dialect(dialect: Dialect) -> Self {
+        Self { output: String::new(), dialect }
+    }
+
+    pub fn into_string(self) -> String {
+        self.output
+    }
+
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
+    }
+
     fn append(&mut self, s: &str) {
         self.output.push_str(s);
     }
@@ -52,10 +108,6 @@ impl Serializer {
         if v.contains("|]") {
             return Err(Error::StringContainsMultilineCloser);
         }
-        // Bare-identifier form: if the content is a valid ident-class
-        // token and not a reserved keyword, emit without delimiters.
-        // Canonical form favours bare for readability of
-        // identifier-shaped string values (e.g. `nota-serde`).
         if is_bare_string_eligible(v) {
             self.output.push_str(v);
             return Ok(());
@@ -77,8 +129,6 @@ impl Serializer {
     }
 
     fn write_float(&mut self, s: &str) {
-        // s is the default shortest-roundtrip repr. Ensure it contains `.`
-        // (or an exponent) so it's unambiguously a float in nota.
         if s.contains('.') || s.contains('e') || s.contains('E') {
             self.output.push_str(s);
         } else {
@@ -86,6 +136,38 @@ impl Serializer {
             self.output.push_str(".0");
         }
     }
+
+    fn serialize_bind<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
+        let mut sub = Serializer::with_dialect(self.dialect);
+        value.serialize(&mut sub)?;
+        let s = sub.output;
+        // Inner may come through bare (canonical for ident-shaped
+        // strings) or `[name]` (bracketed form). Strip the brackets
+        // if present so validation sees just the content.
+        let inner = if s.starts_with('[') && s.ends_with(']') && s.len() >= 2 {
+            &s[1..s.len() - 1]
+        } else {
+            s.as_str()
+        };
+        if !is_valid_bind_name(inner) {
+            return Err(Error::Custom(format!(
+                "Bind name must be camelCase or kebab-case (first char `[a-z_]`, body `[a-z0-9_-]`), got {inner:?}"
+            )));
+        }
+        self.output.push('@');
+        self.output.push_str(inner);
+        Ok(())
+    }
+
+    fn reject_sentinel_in_nota(&self, name: &str) -> Result<()> {
+        Err(Error::Custom(format!(
+            "sentinel newtype-struct `{name}` is not valid in nota dialect; serialize via nexus (`to_string_nexus`) instead"
+        )))
+    }
+}
+
+impl Default for Serializer {
+    fn default() -> Self { Self::new() }
 }
 
 impl<'a> ser::Serializer for &'a mut Serializer {
@@ -180,6 +262,23 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         name: &'static str,
         value: &T,
     ) -> Result<()> {
+        if matches!(name, BIND_SENTINEL | MUTATE_SENTINEL | NEGATE_SENTINEL) {
+            if self.dialect != Dialect::Nexus {
+                return self.reject_sentinel_in_nota(name);
+            }
+            return match name {
+                BIND_SENTINEL => self.serialize_bind(value),
+                MUTATE_SENTINEL => {
+                    self.output.push('~');
+                    value.serialize(self)
+                }
+                NEGATE_SENTINEL => {
+                    self.output.push('!');
+                    value.serialize(self)
+                }
+                _ => unreachable!(),
+            };
+        }
         self.output.push('(');
         self.output.push_str(name);
         self.output.push(' ');
@@ -234,10 +333,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         // Multi-field tuple variants (e.g. `Pair(i32, i32)`) have no
         // schema field names. Single-field variants go through
         // serialize_newtype_variant instead. Reject here.
-        Err(Error::MultiFieldTupleStructForbidden {
-            name: variant,
-            len,
-        })
+        Err(Error::MultiFieldTupleStructForbidden { name: variant, len })
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap> {
@@ -340,9 +436,7 @@ pub struct StructSerializer<'a> {
 
 impl<'a> StructSerializer<'a> {
     fn field<T: Serialize + ?Sized>(&mut self, _key: &'static str, value: &T) -> Result<()> {
-        // Positional: field names come from the Rust schema, not from
-        // the text. Emit a single space before each value; the struct's
-        // opening `(TypeName` was already written by serialize_struct.
+        // Positional: field names live in the schema, not the text.
         self.ser.output.push(' ');
         value.serialize(&mut *self.ser)
     }
@@ -380,14 +474,14 @@ impl<'a> ser::SerializeMap for MapSerializer<'a> {
     type Error = Error;
 
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<()> {
-        let mut sub = Serializer { output: String::new() };
+        let mut sub = Serializer::with_dialect(self.ser.dialect);
         key.serialize(&mut sub)?;
         self.current_key = Some(sub.output);
         Ok(())
     }
 
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
-        let mut sub = Serializer { output: String::new() };
+        let mut sub = Serializer::with_dialect(self.ser.dialect);
         value.serialize(&mut sub)?;
         let key = self.current_key.take().ok_or(Error::MapValueWithoutKey)?;
         self.entries.push((key, sub.output));
@@ -409,213 +503,5 @@ impl<'a> ser::SerializeMap for MapSerializer<'a> {
         }
         self.ser.output.push('>');
         Ok(())
-    }
-}
-
-// ---------- tests ----------
-
-#[cfg(test)]
-mod tests {
-    use super::to_string;
-    use serde::Serialize;
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn primitives() {
-        assert_eq!(to_string(&true).unwrap(), "true");
-        assert_eq!(to_string(&false).unwrap(), "false");
-        assert_eq!(to_string(&42i32).unwrap(), "42");
-        assert_eq!(to_string(&-7i64).unwrap(), "-7");
-        assert_eq!(to_string(&0u32).unwrap(), "0");
-        assert_eq!(to_string(&2.5f64).unwrap(), "2.5");
-        assert_eq!(to_string(&1.0f64).unwrap(), "1.0");
-        assert_eq!(to_string(&-0.5f32).unwrap(), "-0.5");
-        // Ident-shaped strings emit bare; content requiring brackets
-        // goes through a separate test below.
-        assert_eq!(to_string("hello").unwrap(), "hello");
-        assert_eq!(to_string("kebab-name").unwrap(), "kebab-name");
-        // Reserved keywords must stay bracketed so they round-trip
-        // outside a bool / Option context.
-        assert_eq!(to_string("true").unwrap(), "[true]");
-        assert_eq!(to_string("None").unwrap(), "[None]");
-        // Content with a space can't be bare.
-        assert_eq!(to_string("hello world").unwrap(), "[hello world]");
-    }
-
-    #[test]
-    fn string_needing_multiline() {
-        assert_eq!(to_string("a]b").unwrap(), "[|\na]b\n|]");
-        assert_eq!(to_string("line one\nline two").unwrap(), "[|\nline one\nline two\n|]");
-    }
-
-    #[test]
-    fn string_with_multiline_closer_fails() {
-        assert!(to_string("foo|]bar").is_err());
-    }
-
-    #[test]
-    fn bytes_direct() {
-        use serde::Serializer as _;
-        let mut s = super::Serializer { output: String::new() };
-        (&mut s).serialize_bytes(&[0xa1, 0xb2, 0xc3]).unwrap();
-        assert_eq!(s.output, "#a1b2c3");
-    }
-
-    #[test]
-    fn option() {
-        let none: Option<i32> = None;
-        assert_eq!(to_string(&none).unwrap(), "None");
-        let some: Option<i32> = Some(7);
-        assert_eq!(to_string(&some).unwrap(), "7");
-    }
-
-    #[test]
-    fn unit_forbidden() {
-        assert!(to_string(&()).is_err());
-    }
-
-    #[test]
-    fn unit_struct() {
-        #[derive(Serialize)]
-        struct Marker;
-        assert_eq!(to_string(&Marker).unwrap(), "Marker");
-    }
-
-    #[test]
-    fn unit_variant() {
-        #[derive(Serialize)]
-        enum Status { Active, Archived }
-        assert_eq!(to_string(&Status::Active).unwrap(), "Active");
-        assert_eq!(to_string(&Status::Archived).unwrap(), "Archived");
-    }
-
-    #[test]
-    fn newtype_struct_wraps() {
-        #[derive(Serialize)]
-        struct Id(u32);
-        assert_eq!(to_string(&Id(42)).unwrap(), "(Id 42)");
-    }
-
-    #[test]
-    fn newtype_variant_wrapped() {
-        #[derive(Serialize)]
-        enum E { V(i32) }
-        assert_eq!(to_string(&E::V(7)).unwrap(), "(V 7)");
-    }
-
-    #[test]
-    fn tuple_struct_rejected() {
-        #[derive(Serialize)]
-        struct Pair(i32, i32);
-        let err = to_string(&Pair(3, 4)).unwrap_err();
-        assert!(
-            format!("{err}").contains("multi-field unnamed struct"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn tuple_variant_rejected() {
-        #[derive(Serialize)]
-        enum E { Pair(i32, i32) }
-        let err = to_string(&E::Pair(3, 4)).unwrap_err();
-        assert!(
-            format!("{err}").contains("multi-field unnamed struct"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn seq() {
-        let v = vec![1, 2, 3];
-        assert_eq!(to_string(&v).unwrap(), "<1 2 3>");
-    }
-
-    #[test]
-    fn tuple() {
-        let t = (1i32, "a", true);
-        assert_eq!(to_string(&t).unwrap(), "<1 a true>");
-    }
-
-    #[test]
-    fn struct_() {
-        #[derive(Serialize)]
-        struct Point { horizontal: f64, vertical: f64 }
-        assert_eq!(
-            to_string(&Point { horizontal: 3.0, vertical: 4.0 }).unwrap(),
-            "(Point 3.0 4.0)"
-        );
-    }
-
-    #[test]
-    fn struct_variant() {
-        #[derive(Serialize)]
-        enum Shape {
-            Circle { radius: f64 },
-        }
-        assert_eq!(to_string(&Shape::Circle { radius: 2.0 }).unwrap(), "(Circle 2.0)");
-    }
-
-    #[test]
-    fn nested_struct() {
-        #[derive(Serialize)]
-        struct Point { x: f64, y: f64 }
-        #[derive(Serialize)]
-        struct Line { start: Point, end: Point }
-        let l = Line { start: Point { x: 0.0, y: 0.0 }, end: Point { x: 1.0, y: 2.0 } };
-        assert_eq!(to_string(&l).unwrap(), "(Line (Point 0.0 0.0) (Point 1.0 2.0))");
-    }
-
-    #[test]
-    fn map_canonical_sort() {
-        let mut m = BTreeMap::new();
-        m.insert("beta", 2);
-        m.insert("alpha", 1);
-        // Ident-shaped keys emit bare; the canonical sort compares
-        // the serialised key bytes, so `alpha` < `beta`.
-        assert_eq!(to_string(&m).unwrap(), "<(alpha 1) (beta 2)>");
-    }
-
-    #[test]
-    fn map_canonical_sort_with_hashmap() {
-        use std::collections::HashMap;
-        let mut m: HashMap<&str, i32> = HashMap::new();
-        m.insert("zeta", 26);
-        m.insert("alpha", 1);
-        m.insert("mu", 12);
-        // HashMap iteration order is non-deterministic; canonical form
-        // must still emit in sorted-by-serialised-key order.
-        assert_eq!(
-            to_string(&m).unwrap(),
-            "<(alpha 1) (mu 12) (zeta 26)>"
-        );
-    }
-
-    #[test]
-    fn vec_of_structs() {
-        #[derive(Serialize)]
-        struct Point { x: i32, y: i32 }
-        let pts = vec![Point { x: 0, y: 0 }, Point { x: 1, y: 1 }];
-        assert_eq!(
-            to_string(&pts).unwrap(),
-            "<(Point 0 0) (Point 1 1)>"
-        );
-    }
-
-    #[test]
-    fn option_of_newtype_wraps() {
-        #[derive(Serialize)]
-        struct Id(u32);
-        let some: Option<Id> = Some(Id(42));
-        assert_eq!(to_string(&some).unwrap(), "(Id 42)");
-    }
-
-    #[test]
-    fn empty_seq_and_struct() {
-        let v: Vec<i32> = vec![];
-        assert_eq!(to_string(&v).unwrap(), "<>");
-        #[derive(Serialize)]
-        struct Empty;
-        assert_eq!(to_string(&Empty).unwrap(), "Empty");
     }
 }

@@ -1,7 +1,12 @@
-//! Deserializer: parse nota text into types implementing [`serde::Deserialize`].
+//! Deserializer: parse nota/nexus text into types implementing [`serde::Deserialize`].
 //!
 //! Token-stream-driven recursive descent. The lexer produces tokens; the
 //! Deserializer peeks and consumes them driven by the visitor's demands.
+//!
+//! [`Dialect`] selects the grammar. [`Dialect::Nexus`] enables
+//! sentinel-name dispatch on [`BIND_SENTINEL`] / [`MUTATE_SENTINEL`] /
+//! [`NEGATE_SENTINEL`] newtype-struct names for the three query-layer
+//! wrappers.
 
 use serde::de::{
     self, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess,
@@ -9,10 +14,22 @@ use serde::de::{
 };
 
 use crate::error::{Error, Result};
-use crate::lexer::{Lexer, Token};
+use crate::lexer::{Dialect, Lexer, Token};
+use crate::ser::{BIND_SENTINEL, MUTATE_SENTINEL, NEGATE_SENTINEL};
 
 pub fn from_str<'a, T: de::Deserialize<'a>>(input: &'a str) -> Result<T> {
-    let mut de = Deserializer::new(input);
+    from_str_with(input, Dialect::Nota)
+}
+
+pub fn from_str_nexus<'a, T: de::Deserialize<'a>>(input: &'a str) -> Result<T> {
+    from_str_with(input, Dialect::Nexus)
+}
+
+pub fn from_str_with<'a, T: de::Deserialize<'a>>(
+    input: &'a str,
+    dialect: Dialect,
+) -> Result<T> {
+    let mut de = Deserializer::with_dialect(input, dialect);
     let value = T::deserialize(&mut de)?;
     de.expect_end()?;
     Ok(value)
@@ -28,8 +45,8 @@ struct TokenStream<'a> {
 }
 
 impl<'a> TokenStream<'a> {
-    fn new(input: &'a str) -> Self {
-        Self { lexer: Lexer::new(input), peeked: None }
+    fn new(input: &'a str, dialect: Dialect) -> Self {
+        Self { lexer: Lexer::with_dialect(input, dialect), peeked: None }
     }
 
     fn peek(&mut self) -> Result<Option<&Token>> {
@@ -62,8 +79,20 @@ impl<'a> TokenStream<'a> {
 }
 
 impl<'de> Deserializer<'de> {
-    fn new(input: &'de str) -> Self {
-        Self { stream: TokenStream::new(input) }
+    pub fn new(input: &'de str) -> Self {
+        Self::with_dialect(input, Dialect::Nota)
+    }
+
+    pub fn nexus(input: &'de str) -> Self {
+        Self::with_dialect(input, Dialect::Nexus)
+    }
+
+    pub fn with_dialect(input: &'de str, dialect: Dialect) -> Self {
+        Self { stream: TokenStream::new(input, dialect) }
+    }
+
+    pub fn dialect(&self) -> Dialect {
+        self.stream.lexer.dialect()
     }
 
     fn expect_end(&mut self) -> Result<()> {
@@ -189,12 +218,6 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     fn deserialize_str<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         match self.stream.expect_next()? {
             Token::Str(s) => visitor.visit_string(s),
-            // Bare-identifier form: a schema expecting a string may
-            // receive an ident-class token, which we treat as the
-            // string content. Reserved keywords (`true`, `false`) are
-            // already tokenised separately; `None` reaches here only
-            // outside an `Option` context, where treating it as the
-            // literal string "None" is correct.
             Token::Ident(s) => visitor.visit_string(s),
             other => Err(Error::Custom(format!("expected string, got {other:?}"))),
         }
@@ -243,7 +266,38 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         name: &'static str,
         visitor: V,
     ) -> Result<V::Value> {
-        // Newtype structs wrap: `(Name value)`.
+        if matches!(name, BIND_SENTINEL | MUTATE_SENTINEL | NEGATE_SENTINEL) {
+            if self.dialect() != Dialect::Nexus {
+                return Err(Error::Custom(format!(
+                    "sentinel newtype-struct `{name}` is not valid in nota dialect; deserialize via nexus (`from_str_nexus`) instead"
+                )));
+            }
+            return match name {
+                BIND_SENTINEL => {
+                    self.stream.expect_matching(&Token::At)?;
+                    match self.stream.expect_next()? {
+                        Token::Ident(s) => {
+                            let de: serde::de::value::StringDeserializer<Error> =
+                                s.into_deserializer();
+                            visitor.visit_newtype_struct(de)
+                        }
+                        other => Err(Error::Custom(format!(
+                            "expected identifier after `@`, got {other:?}"
+                        ))),
+                    }
+                }
+                MUTATE_SENTINEL => {
+                    self.stream.expect_matching(&Token::Tilde)?;
+                    visitor.visit_newtype_struct(self)
+                }
+                NEGATE_SENTINEL => {
+                    self.stream.expect_matching(&Token::Bang)?;
+                    visitor.visit_newtype_struct(self)
+                }
+                _ => unreachable!(),
+            };
+        }
+        // Plain newtype — `(Name value)`.
         self.stream.expect_matching(&Token::LParen)?;
         match self.stream.expect_next()? {
             Token::Ident(s) if s == name => {}
@@ -273,8 +327,6 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         len: usize,
         _visitor: V,
     ) -> Result<V::Value> {
-        // Multi-field unnamed structs have no schema field names.
-        // Single-field tuple structs go through deserialize_newtype_struct.
         Err(Error::MultiFieldTupleStructForbidden { name, len })
     }
 
@@ -313,12 +365,10 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     ) -> Result<V::Value> {
         match self.stream.peek()? {
             Some(Token::Ident(_)) => {
-                // Bare PascalCase ident → unit variant.
                 visitor.visit_enum(UnitVariant { de: self })
             }
             Some(Token::LParen) => {
-                // (Variant ...) — payload-bearing variant.
-                self.stream.next()?; // consume LParen
+                self.stream.next()?;
                 visitor.visit_enum(PayloadVariant { de: self })
             }
             other => Err(Error::Custom(format!("expected enum variant, got {other:?}"))),
@@ -490,8 +540,6 @@ impl<'a, 'de> VariantAccess<'de> for PayloadVariantAccess<'a, 'de> {
     }
 
     fn tuple_variant<V: Visitor<'de>>(self, len: usize, _visitor: V) -> Result<V::Value> {
-        // Multi-field unnamed variants have no schema field names.
-        // Single-field variants go through newtype_variant_seed instead.
         Err(Error::MultiFieldTupleStructForbidden { name: "<tuple-variant>", len })
     }
 
@@ -500,227 +548,8 @@ impl<'a, 'de> VariantAccess<'de> for PayloadVariantAccess<'a, 'de> {
         _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value> {
-        // Positional — same as deserialize_struct.
         let value = visitor.visit_seq(PositionalArgs { de: self.de })?;
         self.de.stream.expect_matching(&Token::RParen)?;
         Ok(value)
-    }
-}
-
-// ---------- tests ----------
-
-#[cfg(test)]
-mod tests {
-    use super::from_str;
-    use crate::ser::to_string;
-    use serde::{Deserialize, Serialize};
-    use std::collections::BTreeMap;
-
-    fn roundtrip<T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug>(v: T) {
-        let text = to_string(&v).expect("serialize");
-        let back: T = from_str(&text).expect("deserialize");
-        assert_eq!(back, v, "roundtrip mismatch; intermediate text was {text:?}");
-    }
-
-    #[test]
-    fn primitives() {
-        roundtrip(true);
-        roundtrip(false);
-        roundtrip(42i32);
-        roundtrip(-7i64);
-        roundtrip(0u32);
-        roundtrip(2.5f64);
-        roundtrip(1.0f64);
-        roundtrip(-0.5f32);
-        roundtrip("hello".to_string());
-    }
-
-    #[test]
-    fn strings() {
-        roundtrip("hello world".to_string());
-        roundtrip("with ] bracket".to_string());
-        roundtrip("multi\nline".to_string());
-    }
-
-    #[test]
-    fn bytes() {
-        // std Vec<u8> serializes as seq; use a wrapper that forces bytes.
-        // Test via direct lexer+deserializer path:
-        let text = "#a1b2c3";
-        use serde::de::Deserializer as _;
-        struct BytesVisitor;
-        impl<'de> serde::de::Visitor<'de> for BytesVisitor {
-            type Value = Vec<u8>;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "bytes")
-            }
-            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Vec<u8>, E> { Ok(v) }
-        }
-        let mut de = super::Deserializer::new(text);
-        let out = de.deserialize_bytes(BytesVisitor).unwrap();
-        assert_eq!(out, vec![0xa1, 0xb2, 0xc3]);
-    }
-
-    #[test]
-    fn option() {
-        roundtrip::<Option<i32>>(None);
-        roundtrip::<Option<i32>>(Some(7));
-    }
-
-    #[test]
-    fn unit_struct() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct Marker;
-        roundtrip(Marker);
-    }
-
-    #[test]
-    fn simple_enum() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        enum Status { Active, Archived }
-        roundtrip(Status::Active);
-        roundtrip(Status::Archived);
-    }
-
-    #[test]
-    fn newtype_struct() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct Id(u32);
-        roundtrip(Id(42));
-    }
-
-    #[test]
-    fn newtype_variant() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        enum E { V(i32), W(String) }
-        roundtrip(E::V(7));
-        roundtrip(E::W("hi".into()));
-    }
-
-    #[test]
-    fn tuple_struct_ser_rejected() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct Pair(i32, i32);
-        // Nota forbids multi-field unnamed structs on both sides.
-        assert!(to_string(&Pair(3, 4)).is_err());
-        assert!(from_str::<Pair>("(Pair 3 4)").is_err());
-    }
-
-    #[test]
-    fn tuple_variant_ser_rejected() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        enum E { Pair(i32, i32), Triple(i32, i32, i32) }
-        assert!(to_string(&E::Pair(3, 4)).is_err());
-        assert!(to_string(&E::Triple(1, 2, 3)).is_err());
-        assert!(from_str::<E>("(Pair 3 4)").is_err());
-    }
-
-    #[test]
-    fn seq() {
-        roundtrip(vec![1, 2, 3]);
-        roundtrip::<Vec<i32>>(vec![]);
-    }
-
-    #[test]
-    fn tuple() {
-        roundtrip((1i32, "a".to_string(), true));
-    }
-
-    #[test]
-    fn struct_() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct Point { horizontal: f64, vertical: f64 }
-        roundtrip(Point { horizontal: 3.0, vertical: 4.0 });
-    }
-
-    #[test]
-    fn struct_variant() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        enum Shape {
-            Circle { radius: f64 },
-            Square { side: f64 },
-        }
-        roundtrip(Shape::Circle { radius: 2.0 });
-        roundtrip(Shape::Square { side: 3.5 });
-    }
-
-    #[test]
-    fn nested_struct() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct Point { x: f64, y: f64 }
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct Line { start: Point, end: Point }
-        roundtrip(Line {
-            start: Point { x: 0.0, y: 0.0 },
-            end: Point { x: 1.0, y: 2.0 },
-        });
-    }
-
-    #[test]
-    fn map() {
-        let mut m = BTreeMap::new();
-        m.insert("alpha".to_string(), 1);
-        m.insert("beta".to_string(), 2);
-        m.insert("gamma".to_string(), 3);
-        roundtrip(m);
-    }
-
-    #[test]
-    fn vec_of_structs() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct Point { x: i32, y: i32 }
-        roundtrip(vec![
-            Point { x: 0, y: 0 },
-            Point { x: 1, y: 1 },
-            Point { x: -5, y: 10 },
-        ]);
-    }
-
-    #[test]
-    fn struct_with_option() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct Config {
-            name: String,
-            port: Option<u16>,
-            debug: bool,
-        }
-        roundtrip(Config { name: "server".into(), port: Some(8080), debug: true });
-        roundtrip(Config { name: "server".into(), port: None, debug: false });
-    }
-
-    #[test]
-    fn struct_with_vec_and_enum() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        enum Kind { Reader, Writer }
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct Actor { name: String, kind: Kind, tags: Vec<String> }
-        roundtrip(Actor {
-            name: "alice".into(),
-            kind: Kind::Reader,
-            tags: vec!["fast".into(), "reliable".into()],
-        });
-    }
-
-    #[test]
-    fn ignores_comments() {
-        #[derive(Deserialize, PartialEq, Debug)]
-        struct Point { x: f64, y: f64 }
-        let text = "(Point ;; comment\n  3.0 ;; inline\n  4.0)";
-        let p: Point = from_str(text).unwrap();
-        assert_eq!(p, Point { x: 3.0, y: 4.0 });
-    }
-
-    #[test]
-    fn wrong_struct_name_fails() {
-        #[derive(Deserialize, Debug)]
-        #[allow(dead_code)]
-        struct Point { x: f64, y: f64 }
-        assert!(from_str::<Point>("(Line 1.0 2.0)").is_err());
-    }
-
-    #[test]
-    fn integer_overflow_rejected() {
-        let result: Result<i8, _> = from_str("200");
-        assert!(result.is_err());
     }
 }

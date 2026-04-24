@@ -1,22 +1,30 @@
-//! nota-serde-core — shared kernel for [nota-serde](https://github.com/LiGoldragon/nota-serde)
-//! and [nexus-serde](https://github.com/LiGoldragon/nexus-serde).
+//! nota-serde-core — shared kernel for
+//! [nota-serde](https://github.com/LiGoldragon/nota-serde) and
+//! [nexus-serde](https://github.com/LiGoldragon/nexus-serde).
 //!
-//! Holds the format machinery that both crates need:
+//! Holds the format machinery both crates need:
 //!
-//! - [`lexer::Lexer`] and [`lexer::Token`] — tokenise nota/nexus text.
+//! - [`lexer::Lexer`] + [`lexer::Token`] — tokenise nota/nexus text.
 //! - [`ser::Serializer`] — serde `Serializer` producing canonical nota
-//!   text (positional records, bare ident-shaped strings, sorted maps,
-//!   shortest-roundtrip numbers).
-//! - [`de::Deserializer`] — serde `Deserializer` consuming nota text.
+//!   or nexus text (positional records, bare ident-shaped strings,
+//!   sorted maps, shortest-roundtrip numbers).
+//! - [`de::Deserializer`] — serde `Deserializer`.
 //! - [`error::Error`] — unified error type.
 //!
-//! Consumers (`nota-serde`, `nexus-serde`) wrap these with their
-//! own thin façades — `to_string` / `from_str` convenience fns for
-//! nota; sentinel-dispatch wrappers for nexus's query-layer types.
+//! [`lexer::Dialect`] selects grammar: [`Dialect::Nota`](lexer::Dialect::Nota)
+//! is the strict data-layer subset; [`Dialect::Nexus`](lexer::Dialect::Nexus)
+//! is the messaging superset (extra delimiters, sigils, sentinel
+//! newtype-struct dispatch).
 //!
-//! This crate's public API is **internal-facing** — it evolves with the
-//! needs of the two serde crates. Treat breaking changes as minor-bump
-//! pre-1.0.
+//! Consumers wrap these:
+//!
+//! - `nota-serde` re-exports the default (Nota) pair.
+//! - `nexus-serde` re-exports the `_nexus` pair and adds the three
+//!   sentinel wrapper types (`Bind`, `Mutate`, `Negate`).
+//!
+//! This crate's public API is **internal-facing** — it evolves with
+//! the needs of the two serde crates. Treat breaking changes as
+//! minor-bump pre-1.0.
 //!
 //! ```
 //! use nota_serde_core::{to_string, from_str};
@@ -37,6 +45,10 @@ pub mod error;
 pub mod lexer;
 pub mod ser;
 
-pub use de::{from_str, Deserializer};
+pub use de::{from_str, from_str_nexus, from_str_with, Deserializer};
 pub use error::{Error, Result};
-pub use ser::{to_string, Serializer};
+pub use lexer::{Dialect, Lexer, Token};
+pub use ser::{
+    to_string, to_string_nexus, to_string_with, Serializer,
+    BIND_SENTINEL, MUTATE_SENTINEL, NEGATE_SENTINEL,
+};

@@ -8,7 +8,7 @@
 //! four delimiter pairs and two sigils. `Dialect::Nexus` additionally
 //! accepts the nexus superset: three additional delimiter pairs plus
 //! the three sigils `~`, `@`, `!`; the `=` bind-alias token; and the
-//! Tier-1 extensions from [reports/013](../../../../../mentci-next/reports/013-nexus-syntax-proposal.md):
+//! Tier-1 extensions from [reports/013](../../../../../mentci/reports/013-nexus-syntax-proposal.md):
 //! `<| |>` stream, `(|| ||)` optional pattern, `{|| ||}` atomic txn.
 
 use crate::error::{Error, Result};

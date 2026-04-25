@@ -6,10 +6,11 @@
 //!
 //! [`Dialect`] selects the grammar. `Dialect::Nota` accepts only nota's
 //! four delimiter pairs and two sigils. `Dialect::Nexus` additionally
-//! accepts the nexus superset: three additional delimiter pairs plus
-//! the three sigils `~`, `@`, `!`; the `=` bind-alias token; and the
-//! Tier-1 extensions from [reports/013](../../../../../mentci/reports/013-nexus-syntax-proposal.md):
-//! `<| |>` stream, `(|| ||)` optional pattern, `{|| ||}` atomic txn.
+//! accepts the nexus superset: three additional delimiter pairs
+//! (`(| |)` patterns, `{| |}` constraints, `{ }` shapes) plus the
+//! three sigils `~`, `@`, `!` and the `=` bind-alias token. See
+//! [nexus/spec/grammar.md](https://github.com/LiGoldragon/nexus/blob/main/spec/grammar.md)
+//! for the locked v3 token table.
 
 use crate::error::{Error, Result};
 
@@ -58,16 +59,6 @@ pub enum Token {
     RBracePipe,   // |} (constrain close)
     LParenPipe,   // (| (pattern open)
     RParenPipe,   // |) (pattern close)
-
-    // Tier-1 tokens (report 013). Never produced in Nota mode.
-    LAnglePipe,   // <| (stream / subscription open)
-    RAnglePipe,   // |> (stream close)
-    LParenDouble, // (|| (optional pattern open)
-    RParenDouble, // ||) (optional pattern close)
-    LBraceDouble, // {|| (atomic transaction open)
-    RBraceDouble, // ||} (atomic transaction close)
-    LAngleDouble, // <|| (windowed stream open, Phase 2 reserved)
-    RAngleDouble, // ||> (windowed stream close, Phase 2 reserved)
 }
 
 pub struct Lexer<'a> {
@@ -97,10 +88,6 @@ impl<'a> Lexer<'a> {
 
     fn peek_byte(&self) -> Option<u8> {
         self.input.as_bytes().get(self.pos).copied()
-    }
-
-    fn peek_at(&self, offset: usize) -> Option<u8> {
-        self.input.as_bytes().get(self.pos + offset).copied()
     }
 
     fn peek2_bytes(&self) -> Option<(u8, u8)> {
@@ -180,84 +167,46 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// `(` → `LParen`, `(|` → `LParenPipe`, `(||` → `LParenDouble`
-    /// (the last two nexus-only).
+    /// `(` → `LParen`, `(|` → `LParenPipe` (nexus-only).
     fn read_left_paren(&mut self) -> Token {
         self.pos += 1;
         if self.dialect != Dialect::Nexus || self.peek_byte() != Some(b'|') {
             return Token::LParen;
         }
         self.pos += 1;
-        if self.peek_byte() == Some(b'|') {
-            self.pos += 1;
-            Token::LParenDouble
-        } else {
-            Token::LParenPipe
-        }
+        Token::LParenPipe
     }
 
-    /// `{` → `LBrace`, `{|` → `LBracePipe`, `{||` → `LBraceDouble`.
-    /// Nexus-only; caller gates dialect.
+    /// `{` → `LBrace`, `{|` → `LBracePipe`. Nexus-only; caller gates
+    /// dialect.
     fn read_left_brace(&mut self) -> Token {
         self.pos += 1;
         if self.peek_byte() != Some(b'|') {
             return Token::LBrace;
         }
         self.pos += 1;
-        if self.peek_byte() == Some(b'|') {
-            self.pos += 1;
-            Token::LBraceDouble
-        } else {
-            Token::LBracePipe
-        }
+        Token::LBracePipe
     }
 
-    /// `<` → `LAngle`, `<|` → `LAnglePipe`, `<||` → `LAngleDouble`
-    /// (the piped forms nexus-only).
+    /// `<` → `LAngle`. The `<|` form is not in v3 nexus — angles only
+    /// open sequences.
     fn read_left_angle(&mut self) -> Token {
         self.pos += 1;
-        if self.dialect != Dialect::Nexus || self.peek_byte() != Some(b'|') {
-            return Token::LAngle;
-        }
-        self.pos += 1;
-        if self.peek_byte() == Some(b'|') {
-            self.pos += 1;
-            Token::LAngleDouble
-        } else {
-            Token::LAnglePipe
-        }
+        Token::LAngle
     }
 
     /// Decode a leading `|` into its closing-pair token. Nexus-only.
-    ///
-    /// Single-pipe closers: `|)`, `|}`, `|>`.
-    /// Double-pipe closers: `||)`, `||}`, `||>`.
+    /// Closers: `|)` for patterns, `|}` for constraints.
     fn read_pipe_close(&mut self) -> Result<Token> {
         self.pos += 1;
-        if self.peek_byte() == Some(b'|') {
-            // double-pipe close
-            let tail = self.peek_at(1);
-            match tail {
-                Some(b')') => { self.pos += 2; Ok(Token::RParenDouble) }
-                Some(b'}') => { self.pos += 2; Ok(Token::RBraceDouble) }
-                Some(b'>') => { self.pos += 2; Ok(Token::RAngleDouble) }
-                Some(other) => Err(Error::Custom(format!(
-                    "unexpected `||` followed by {:?} — expected `||)`, `||}}` or `||>`",
-                    other as char
-                ))),
-                None => Err(Error::Custom("unexpected `||` at end of input".into())),
-            }
-        } else {
-            match self.peek_byte() {
-                Some(b')') => { self.pos += 1; Ok(Token::RParenPipe) }
-                Some(b'}') => { self.pos += 1; Ok(Token::RBracePipe) }
-                Some(b'>') => { self.pos += 1; Ok(Token::RAnglePipe) }
-                Some(other) => Err(Error::Custom(format!(
-                    "unexpected `|` followed by {:?} — expected `|)`, `|}}`, `|>`, `||)`, `||}}` or `||>`",
-                    other as char
-                ))),
-                None => Err(Error::Custom("unexpected `|` at end of input".into())),
-            }
+        match self.peek_byte() {
+            Some(b')') => { self.pos += 1; Ok(Token::RParenPipe) }
+            Some(b'}') => { self.pos += 1; Ok(Token::RBracePipe) }
+            Some(other) => Err(Error::Custom(format!(
+                "unexpected `|` followed by {:?} — expected `|)` or `|}}`",
+                other as char
+            ))),
+            None => Err(Error::Custom("unexpected `|` at end of input".into())),
         }
     }
 

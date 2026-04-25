@@ -1,6 +1,5 @@
-//! Nexus-dialect integration tests — lexer extensions, sentinel
-//! dispatch on `Bind`/`Mutate`/`Negate`, and Tier-1 delimiter tokens
-//! (`<| |>`, `(|| ||)`, `{|| ||}`).
+//! Nexus-dialect integration tests — lexer extensions and sentinel
+//! dispatch on `Bind`/`Mutate`/`Negate`.
 
 use nota_serde_core::{
     from_str, from_str_nexus, to_string_nexus, to_string,
@@ -81,92 +80,6 @@ mod lexer_nexus_delimiters {
             Token::Ident("h".into()),
             Token::RParenPipe,
         ]);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Lexer: Tier-1 tokens (report 013).
-
-mod lexer_tier1 {
-    use super::*;
-
-    #[test]
-    fn stream_delim_open_close() {
-        assert_eq!(lex_nexus("<| |>"), vec![Token::LAnglePipe, Token::RAnglePipe]);
-    }
-
-    #[test]
-    fn optional_pattern_delim() {
-        assert_eq!(
-            lex_nexus("(|| ||)"),
-            vec![Token::LParenDouble, Token::RParenDouble]
-        );
-    }
-
-    #[test]
-    fn atomic_txn_delim() {
-        assert_eq!(
-            lex_nexus("{|| ||}"),
-            vec![Token::LBraceDouble, Token::RBraceDouble]
-        );
-    }
-
-    #[test]
-    fn windowed_stream_delim() {
-        assert_eq!(
-            lex_nexus("<|| ||>"),
-            vec![Token::LAngleDouble, Token::RAngleDouble]
-        );
-    }
-
-    #[test]
-    fn windowed_stream_disambiguates_from_single() {
-        assert_eq!(lex_nexus("<|"), vec![Token::LAnglePipe]);
-        assert_eq!(lex_nexus("<||"), vec![Token::LAngleDouble]);
-        assert_eq!(lex_nexus("|>"), vec![Token::RAnglePipe]);
-        assert_eq!(lex_nexus("||>"), vec![Token::RAngleDouble]);
-    }
-
-    #[test]
-    fn tier1_vs_non_tier1_disambiguates() {
-        // `(|` is pattern; `(||` is optional pattern. Grammar must pick
-        // the double-pipe form when the second `|` is present.
-        assert_eq!(lex_nexus("(|"), vec![Token::LParenPipe]);
-        assert_eq!(lex_nexus("(||"), vec![Token::LParenDouble]);
-    }
-
-    #[test]
-    fn stream_carrying_pattern() {
-        let toks = lex_nexus("<|(| Point |)|>");
-        assert_eq!(toks, vec![
-            Token::LAnglePipe,
-            Token::LParenPipe,
-            Token::Ident("Point".into()),
-            Token::RParenPipe,
-            Token::RAnglePipe,
-        ]);
-    }
-
-    #[test]
-    fn stream_only_in_nexus_mode() {
-        // In nota mode, `<|` is LAngle + then `|` is an error.
-        let mut l = Lexer::new("<|");
-        assert_eq!(l.next_token().unwrap(), Some(Token::LAngle));
-        assert!(l.next_token().is_err());
-    }
-
-    #[test]
-    fn double_close_disambiguates_from_single() {
-        assert_eq!(lex_nexus("|)"), vec![Token::RParenPipe]);
-        assert_eq!(lex_nexus("||)"), vec![Token::RParenDouble]);
-        assert_eq!(lex_nexus("|}"), vec![Token::RBracePipe]);
-        assert_eq!(lex_nexus("||}"), vec![Token::RBraceDouble]);
-    }
-
-    #[test]
-    fn bare_double_pipe_no_closer_errors() {
-        let mut l = Lexer::nexus("||x");
-        assert!(l.next_token().is_err());
     }
 }
 

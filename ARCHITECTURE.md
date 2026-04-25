@@ -57,4 +57,4 @@ CANON. End-user surface is via the façades.
 - nexus grammar:
   [github.com/LiGoldragon/nexus](https://github.com/LiGoldragon/nexus)
 - Layer 0 of the project architecture:
-  [mentci-next/docs/architecture.md §8](https://github.com/LiGoldragon/mentci-next/blob/main/docs/architecture.md)
+  [criome/ARCHITECTURE.md §8](https://github.com/LiGoldragon/criome/blob/main/ARCHITECTURE.md)

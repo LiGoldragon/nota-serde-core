@@ -75,12 +75,12 @@ fn roundtrip_realistic_document() {
     // Spot-check stable substrings. Fields are positional in
     // source-declaration order — name first. Ident-shaped strings
     // emit bare; strings starting with a digit (e.g. "0.1.0")
-    // can't go bare and stay in `[ ]`.
-    assert!(text.starts_with("(Project nota-serde [0.1.0]"));
+    // can't go bare and stay in `" "`.
+    assert!(text.starts_with("(Project nota-serde \"0.1.0\""));
     assert!(text.contains("LicenseOfNonAuthority"));
     // The version-string literal "2026-04-23" starts with a digit so
-    // it can't go bare; stays in `[ ]`.
-    assert!(text.contains("(Released [2026-04-23])"));
+    // it can't go bare; stays in `" "`.
+    assert!(text.contains("(Released \"2026-04-23\")"));
     // Option<T>::None renders as bare `None`; final position.
     assert!(text.ends_with("None)"));
 
@@ -106,11 +106,11 @@ fn roundtrip_with_archived_status_variant() {
 
     let text = nota_serde_core::to_string(&doc).expect("serialize");
     // Struct-variant in positional form: (Archived reason-val at_commit-val).
-    // "superseded by nexus-serde" has a space → bracketed; "abcdef"
+    // "superseded by nexus-serde" has a space → quoted; "abcdef"
     // is ident-shaped → bare.
-    assert!(text.contains("(Archived [superseded by nexus-serde] abcdef)"));
+    assert!(text.contains("(Archived \"superseded by nexus-serde\" abcdef)"));
     // Option::Some(x) renders transparently; content has a space.
-    assert!(text.contains("[see report 007]"));
+    assert!(text.contains("\"see report 007\""));
 
     let back: Project = nota_serde_core::from_str(&text).expect("deserialize");
     assert_eq!(back, doc);
@@ -120,19 +120,21 @@ fn roundtrip_with_archived_status_variant() {
 fn parse_hand_written_document() {
     // What a developer would write — positional, indented, with
     // comments scattered across positions. Parser must tolerate.
+    // Mix of bare-ident (canonical) and explicit `" "` / `""" """`
+    // forms; both are accepted on input.
     let text = r#"
         ;; Demo project manifest
         (Project
-          [tiny]
-          [0.0.1]
-          [|
+          tiny
+          "0.0.1"
+          """
             two
             lines
-          |]
-          <[anon]>
+          """
+          [anon]
           ;; no deps yet
-          <>
-          <([debug] true)>
+          []
+          [(debug true)]
           Mit
           Alpha
           None)

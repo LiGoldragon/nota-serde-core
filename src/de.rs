@@ -5,8 +5,9 @@
 //!
 //! [`Dialect`] selects the grammar. [`Dialect::Nexus`] enables
 //! sentinel-name dispatch on [`BIND_SENTINEL`] / [`MUTATE_SENTINEL`] /
-//! [`NEGATE_SENTINEL`] newtype-struct names for the three query-layer
-//! wrappers.
+//! [`NEGATE_SENTINEL`] / [`VALIDATE_SENTINEL`] / [`SUBSCRIBE_SENTINEL`] /
+//! [`ATOMIC_BATCH_SENTINEL`] newtype-struct names for the six
+//! query-layer wrappers.
 
 use serde::de::{
     self, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess,
@@ -15,7 +16,10 @@ use serde::de::{
 
 use crate::error::{Error, Result};
 use crate::lexer::{Dialect, Lexer, Token};
-use crate::ser::{BIND_SENTINEL, MUTATE_SENTINEL, NEGATE_SENTINEL};
+use crate::ser::{
+    ATOMIC_BATCH_SENTINEL, BIND_SENTINEL, MUTATE_SENTINEL, NEGATE_SENTINEL,
+    SUBSCRIBE_SENTINEL, VALIDATE_SENTINEL,
+};
 
 pub fn from_str<'a, T: de::Deserialize<'a>>(input: &'a str) -> Result<T> {
     from_str_with(input, Dialect::Nota)
@@ -197,8 +201,8 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     }
 
     fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        // Char values may arrive as either Token::Str (bracketed form
-        // `[x]`) or Token::Ident (bare-identifier form for single-char
+        // Char values may arrive as either Token::Str (quoted form
+        // `"x"`) or Token::Ident (bare-identifier form for single-char
         // idents like `a`, `_`). `serialize_char` routes through
         // write_str_literal which emits bare when eligible — the
         // deserialize path must accept both.
@@ -266,7 +270,15 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         name: &'static str,
         visitor: V,
     ) -> Result<V::Value> {
-        if matches!(name, BIND_SENTINEL | MUTATE_SENTINEL | NEGATE_SENTINEL) {
+        if matches!(
+            name,
+            BIND_SENTINEL
+                | MUTATE_SENTINEL
+                | NEGATE_SENTINEL
+                | VALIDATE_SENTINEL
+                | SUBSCRIBE_SENTINEL
+                | ATOMIC_BATCH_SENTINEL
+        ) {
             if self.dialect() != Dialect::Nexus {
                 return Err(Error::Custom(format!(
                     "sentinel newtype-struct `{name}` is not valid in nota dialect; deserialize via nexus (`from_str_nexus`) instead"
@@ -294,6 +306,20 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
                     self.stream.expect_matching(&Token::Bang)?;
                     visitor.visit_newtype_struct(self)
                 }
+                VALIDATE_SENTINEL => {
+                    self.stream.expect_matching(&Token::Question)?;
+                    visitor.visit_newtype_struct(self)
+                }
+                SUBSCRIBE_SENTINEL => {
+                    self.stream.expect_matching(&Token::Star)?;
+                    visitor.visit_newtype_struct(self)
+                }
+                ATOMIC_BATCH_SENTINEL => {
+                    self.stream.expect_matching(&Token::LBracketPipe)?;
+                    let value = visitor.visit_newtype_struct(AtomicBatchInner { de: self })?;
+                    self.stream.expect_matching(&Token::RBracketPipe)?;
+                    Ok(value)
+                }
                 _ => unreachable!(),
             };
         }
@@ -311,9 +337,9 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     }
 
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.stream.expect_matching(&Token::LAngle)?;
+        self.stream.expect_matching(&Token::LBracket)?;
         let value = visitor.visit_seq(SeqReader { de: self })?;
-        self.stream.expect_matching(&Token::RAngle)?;
+        self.stream.expect_matching(&Token::RBracket)?;
         Ok(value)
     }
 
@@ -331,9 +357,9 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.stream.expect_matching(&Token::LAngle)?;
+        self.stream.expect_matching(&Token::LBracket)?;
         let value = visitor.visit_map(MapReader { de: self, done: false })?;
-        self.stream.expect_matching(&Token::RAngle)?;
+        self.stream.expect_matching(&Token::RBracket)?;
         Ok(value)
     }
 
@@ -400,7 +426,7 @@ impl<'a, 'de> SeqAccess<'de> for SeqReader<'a, 'de> {
         &mut self,
         seed: T,
     ) -> Result<Option<T::Value>> {
-        if matches!(self.de.stream.peek()?, Some(Token::RAngle) | None) {
+        if matches!(self.de.stream.peek()?, Some(Token::RBracket) | None) {
             return Ok(None);
         }
         seed.deserialize(&mut *self.de).map(Some)
@@ -445,7 +471,7 @@ impl<'a, 'de> MapAccess<'de> for MapReader<'a, 'de> {
             return Ok(None);
         }
         match self.de.stream.peek()? {
-            Some(Token::RAngle) | None => Ok(None),
+            Some(Token::RBracket) | None => Ok(None),
             Some(Token::LParen) => {
                 self.de.stream.next()?;
                 seed.deserialize(&mut *self.de).map(Some)
@@ -551,5 +577,59 @@ impl<'a, 'de> VariantAccess<'de> for PayloadVariantAccess<'a, 'de> {
         let value = visitor.visit_seq(PositionalArgs { de: self.de })?;
         self.de.stream.expect_matching(&Token::RParen)?;
         Ok(value)
+    }
+}
+
+// ---------- atomic-batch inner ----------
+
+/// Deserializer wrapper presented to a sentinel `AtomicBatch<T>` newtype's
+/// inner. Translates calls for sequences (`deserialize_seq`,
+/// `deserialize_tuple`) into a stream of items between the already-consumed
+/// `[|` and the `|]` we expect at end. Other ser/de surface delegates back
+/// to the parent deserializer.
+struct AtomicBatchInner<'a, 'de> {
+    de: &'a mut Deserializer<'de>,
+}
+
+impl<'a, 'de> de::Deserializer<'de> for AtomicBatchInner<'a, 'de> {
+    type Error = Error;
+
+    fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
+        visitor.visit_seq(AtomicBatchReader { de: self.de })
+    }
+
+    fn deserialize_tuple<V: Visitor<'de>>(self, _len: usize, visitor: V) -> Result<V::Value> {
+        self.deserialize_seq(visitor)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64
+        char str string bytes byte_buf option unit unit_struct
+        newtype_struct tuple_struct map struct enum identifier
+        ignored_any
+    }
+
+    fn deserialize_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value> {
+        Err(Error::Custom(
+            "AtomicBatch inner must be a sequence type — `deserialize_any` not supported".into(),
+        ))
+    }
+}
+
+struct AtomicBatchReader<'a, 'de> {
+    de: &'a mut Deserializer<'de>,
+}
+
+impl<'a, 'de> SeqAccess<'de> for AtomicBatchReader<'a, 'de> {
+    type Error = Error;
+
+    fn next_element_seed<T: DeserializeSeed<'de>>(
+        &mut self,
+        seed: T,
+    ) -> Result<Option<T::Value>> {
+        if matches!(self.de.stream.peek()?, Some(Token::RBracketPipe) | None) {
+            return Ok(None);
+        }
+        seed.deserialize(&mut *self.de).map(Some)
     }
 }

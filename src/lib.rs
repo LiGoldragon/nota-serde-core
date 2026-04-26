@@ -50,5 +50,6 @@ pub use error::{Error, Result};
 pub use lexer::{Dialect, Lexer, Token};
 pub use ser::{
     to_string, to_string_nexus, to_string_with, Serializer,
-    BIND_SENTINEL, MUTATE_SENTINEL, NEGATE_SENTINEL,
+    ATOMIC_BATCH_SENTINEL, BIND_SENTINEL, MUTATE_SENTINEL, NEGATE_SENTINEL,
+    SUBSCRIBE_SENTINEL, VALIDATE_SENTINEL,
 };

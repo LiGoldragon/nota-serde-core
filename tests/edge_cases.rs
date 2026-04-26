@@ -20,14 +20,14 @@ mod dedent {
 
     #[test]
     fn strips_common_4_space_indent() {
-        let text = "[|\n    hello\n    world\n|]";
+        let text = "\"\"\"\n    hello\n    world\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "hello\nworld");
     }
 
     #[test]
     fn strips_common_2_space_indent() {
-        let text = "[|\n  a\n    b\n|]";
+        let text = "\"\"\"\n  a\n    b\n\"\"\"";
         let s: String = from_str(text).unwrap();
         // min-indent is 2; `b`'s 4-space line keeps 2 spaces after strip.
         assert_eq!(s, "a\n  b");
@@ -35,56 +35,56 @@ mod dedent {
 
     #[test]
     fn strips_common_tab_indent() {
-        let text = "[|\n\thello\n\tworld\n|]";
+        let text = "\"\"\"\n\thello\n\tworld\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "hello\nworld");
     }
 
     #[test]
     fn no_indent_keeps_content() {
-        let text = "[|\nhello\nworld\n|]";
+        let text = "\"\"\"\nhello\nworld\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "hello\nworld");
     }
 
     #[test]
     fn single_content_line() {
-        let text = "[|\n    hello\n|]";
+        let text = "\"\"\"\n    hello\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "hello");
     }
 
     #[test]
     fn preserves_internal_blank_line() {
-        let text = "[|\n  a\n\n  b\n|]";
+        let text = "\"\"\"\n  a\n\n  b\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "a\n\nb");
     }
 
     #[test]
     fn skips_leading_blank_lines() {
-        let text = "[|\n\n\n  hello\n|]";
+        let text = "\"\"\"\n\n\n  hello\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "hello");
     }
 
     #[test]
     fn skips_trailing_blank_lines() {
-        let text = "[|\n  hello\n\n\n|]";
+        let text = "\"\"\"\n  hello\n\n\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "hello");
     }
 
     #[test]
     fn all_blank_yields_empty() {
-        let text = "[|\n\n  \n\t\n|]";
+        let text = "\"\"\"\n\n  \n\t\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "");
     }
 
     #[test]
     fn completely_empty_yields_empty() {
-        let text = "[|\n|]";
+        let text = "\"\"\"\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "");
     }
@@ -93,7 +93,7 @@ mod dedent {
     fn min_indent_computed_from_nonblank_lines_only() {
         // Blank lines don't influence min_indent. Line 2's empty string
         // should not force min_indent to zero.
-        let text = "[|\n    a\n\n    b\n|]";
+        let text = "\"\"\"\n    a\n\n    b\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "a\n\nb");
     }
@@ -102,7 +102,7 @@ mod dedent {
     fn one_shorter_line_kept_as_is() {
         // First content line has 4 spaces, second has 2 → min is 2,
         // first strips to 2 leading spaces remaining.
-        let text = "[|\n    x\n  y\n|]";
+        let text = "\"\"\"\n    x\n  y\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "  x\ny");
     }
@@ -112,7 +112,7 @@ mod dedent {
         // Current policy: each byte of leading whitespace counts 1,
         // regardless of whether it's a tab or a space. Documents
         // behavior; revisit if consumers hit this in practice.
-        let text = "[|\n\t x\n  y\n|]";
+        let text = "\"\"\"\n\t x\n  y\n\"\"\"";
         // Both lines have 2 bytes of leading whitespace → min is 2,
         // both strip fully.
         let s: String = from_str(text).unwrap();
@@ -123,7 +123,7 @@ mod dedent {
     fn crlf_line_endings_handled() {
         // Rust's str::lines() strips both \n and \r\n — content after
         // dedent should be the same as with \n alone.
-        let text = "[|\r\n    hello\r\n    world\r\n|]";
+        let text = "\"\"\"\r\n    hello\r\n    world\r\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "hello\nworld");
     }
@@ -133,34 +133,37 @@ mod dedent {
         // Trailing spaces on a content line aren't dedented, only
         // leading ones. (Though our current trim-based blank check
         // treats a space-only line as blank — see all_blank case.)
-        let text = "[|\n  a   \n  b\n|]";
+        let text = "\"\"\"\n  a   \n  b\n\"\"\"";
         let s: String = from_str(text).unwrap();
         assert_eq!(s, "a   \nb");
     }
 
     #[test]
-    fn embedded_single_pipe_not_mistaken_for_closer() {
-        // `|` alone (not `|]`) is allowed inside a multiline string.
-        let text = "[|\n  a | b\n|]";
+    fn embedded_single_quote_not_mistaken_for_closer() {
+        // A lone `"` (not `"""`) inside a multiline string is allowed —
+        // only the triple-quote sequence closes.
+        let text = "\"\"\"\n  a \" b\n\"\"\"";
         let s: String = from_str(text).unwrap();
-        assert_eq!(s, "a | b");
+        assert_eq!(s, "a \" b");
     }
 
     #[test]
-    fn embedded_pipe_space_bracket_allowed() {
-        // `| ]` with intervening space is not a closer.
-        let text = "[|\n  a | ] b\n|]";
+    fn embedded_double_quote_pair_not_mistaken_for_closer() {
+        // `""` (two quotes) inside a multiline string is also allowed;
+        // only `"""` (three) closes.
+        let text = "\"\"\"\n  a \"\" b\n\"\"\"";
         let s: String = from_str(text).unwrap();
-        assert_eq!(s, "a | ] b");
+        assert_eq!(s, "a \"\" b");
     }
 
     #[test]
-    fn inline_string_with_bracket_forces_multiline() {
-        // Round-trip: a value containing `]` can't use inline form,
-        // so the serializer switches to `[| |]` automatically.
-        let original = "a]b".to_string();
+    fn inline_string_with_quote_forces_multiline() {
+        // Round-trip: a value containing `"` can't use inline form
+        // without escapes, so the serializer switches to `""" """`
+        // automatically.
+        let original = "a\"b".to_string();
         let text = nota_serde_core::to_string(&original).unwrap();
-        assert!(text.starts_with("[|"), "got {text:?}");
+        assert!(text.starts_with("\"\"\""), "got {text:?}");
         let back: String = from_str(&text).unwrap();
         assert_eq!(back, original);
     }
@@ -319,7 +322,7 @@ mod strings {
 
     #[test]
     fn empty_inline() {
-        let back: String = from_str("[]").unwrap();
+        let back: String = from_str("\"\"").unwrap();
         assert_eq!(back, "");
     }
 
@@ -339,19 +342,19 @@ mod strings {
 
     #[test]
     fn semicolon_in_string_not_comment() {
-        let back: String = from_str("[a ; b]").unwrap();
+        let back: String = from_str("\"a ; b\"").unwrap();
         assert_eq!(back, "a ; b");
     }
 
     #[test]
     fn double_semicolon_in_string_not_comment() {
-        let back: String = from_str("[a ;; still in string]").unwrap();
+        let back: String = from_str("\"a ;; still in string\"").unwrap();
         assert_eq!(back, "a ;; still in string");
     }
 
     #[test]
     fn hash_in_string_not_bytes() {
-        let back: String = from_str("[#abc]").unwrap();
+        let back: String = from_str("\"#abc\"").unwrap();
         assert_eq!(back, "#abc");
     }
 
@@ -366,16 +369,17 @@ mod strings {
     fn multiline_forced_by_newline() {
         let original = "line one\nline two".to_string();
         let text = to_string(&original).unwrap();
-        assert!(text.starts_with("[|"), "expected multiline form, got {text:?}");
+        assert!(text.starts_with("\"\"\""), "expected multiline form, got {text:?}");
         let back: String = from_str(&text).unwrap();
         assert_eq!(back, original);
     }
 
     #[test]
-    fn string_with_pipe_close_rejected() {
-        // `|]` inside a string has no escape syntax; the serializer must
-        // reject rather than produce ambiguous output.
-        assert!(to_string(&"contains|]closer".to_string()).is_err());
+    fn string_with_triple_quote_rejected() {
+        // `"""` inside a string would close the multiline form
+        // prematurely; serializer rejects rather than producing
+        // ambiguous output.
+        assert!(to_string(&"contains\"\"\"closer".to_string()).is_err());
     }
 }
 
@@ -456,7 +460,7 @@ mod maps {
         m.insert("b".to_string(), 2);
         let text = to_string(&m).unwrap();
         // Ident-shaped keys emit bare; canonical sort on bytes.
-        assert_eq!(text, "<(a 1) (b 2) (c 3)>");
+        assert_eq!(text, "[(a 1) (b 2) (c 3)]");
     }
 
     #[test]
@@ -468,7 +472,7 @@ mod maps {
             m.insert(k, v);
         }
         let text = to_string(&m).unwrap();
-        assert_eq!(text, "<(alpha 1) (beta 2) (mu 12) (zeta 26)>");
+        assert_eq!(text, "[(alpha 1) (beta 2) (mu 12) (zeta 26)]");
     }
 
     #[test]
@@ -481,7 +485,7 @@ mod maps {
         m.insert(10, "ten");
         m.insert(2, "two");
         let text = to_string(&m).unwrap();
-        assert_eq!(text, "<(1 one) (10 ten) (2 two)>");
+        assert_eq!(text, "[(1 one) (10 ten) (2 two)]");
     }
 
     #[test]
@@ -604,19 +608,19 @@ mod errors {
 
     #[test]
     fn unclosed_sequence_rejected() {
-        let result: Result<Vec<i32>, _> = from_str("<1 2 3");
+        let result: Result<Vec<i32>, _> = from_str("[1 2 3");
         assert!(result.is_err());
     }
 
     #[test]
     fn unclosed_inline_string_rejected() {
-        let result: Result<String, _> = from_str("[hello");
+        let result: Result<String, _> = from_str("\"hello");
         assert!(result.is_err());
     }
 
     #[test]
     fn unclosed_multiline_string_rejected() {
-        let result: Result<String, _> = from_str("[|\nhello\n");
+        let result: Result<String, _> = from_str("\"\"\"\nhello\n");
         assert!(result.is_err());
     }
 
@@ -700,19 +704,19 @@ mod bare_strings {
     }
 
     #[test]
-    fn canonical_keeps_brackets_when_not_eligible() {
-        // Space → needs brackets.
-        assert_eq!(to_string(&"hello world".to_string()).unwrap(), "[hello world]");
+    fn canonical_keeps_quotes_when_not_eligible() {
+        // Space → needs quotes.
+        assert_eq!(to_string(&"hello world".to_string()).unwrap(), "\"hello world\"");
         // Leading digit → not an ident.
-        assert_eq!(to_string(&"42abc".to_string()).unwrap(), "[42abc]");
+        assert_eq!(to_string(&"42abc".to_string()).unwrap(), "\"42abc\"");
         // Leading hyphen → not an ident.
-        assert_eq!(to_string(&"-foo".to_string()).unwrap(), "[-foo]");
-        // Empty → `[]`.
-        assert_eq!(to_string(&"".to_string()).unwrap(), "[]");
-        // Reserved words stay bracketed.
-        assert_eq!(to_string(&"true".to_string()).unwrap(), "[true]");
-        assert_eq!(to_string(&"false".to_string()).unwrap(), "[false]");
-        assert_eq!(to_string(&"None".to_string()).unwrap(), "[None]");
+        assert_eq!(to_string(&"-foo".to_string()).unwrap(), "\"-foo\"");
+        // Empty → `""`.
+        assert_eq!(to_string(&"".to_string()).unwrap(), "\"\"");
+        // Reserved words stay quoted.
+        assert_eq!(to_string(&"true".to_string()).unwrap(), "\"true\"");
+        assert_eq!(to_string(&"false".to_string()).unwrap(), "\"false\"");
+        assert_eq!(to_string(&"None".to_string()).unwrap(), "\"None\"");
     }
 
     #[test]
@@ -725,20 +729,35 @@ mod bare_strings {
         assert_eq!(s, "PascalCase");
         let s: String = from_str("_private").unwrap();
         assert_eq!(s, "_private");
+        // User clarification: every ident-class token is a first-class
+        // bare String. PascalCase, camelCase, kebab-case all qualify.
+        let s: String = from_str("User").unwrap();
+        assert_eq!(s, "User");
+        let s: String = from_str("Apple").unwrap();
+        assert_eq!(s, "Apple");
+        let s: String = from_str("writes").unwrap();
+        assert_eq!(s, "writes");
+        let s: String = from_str("lojix-schema").unwrap();
+        assert_eq!(s, "lojix-schema");
+        let s: String = from_str("nexus").unwrap();
+        assert_eq!(s, "nexus");
     }
 
     #[test]
-    fn bracketed_form_still_accepted() {
-        // Both forms must parse for backward compatibility.
-        let s: String = from_str("[hello]").unwrap();
+    fn quoted_form_still_accepted() {
+        // Both forms must parse — the schema accepts the equivalent.
+        let s: String = from_str("\"hello\"").unwrap();
         assert_eq!(s, "hello");
-        let s: String = from_str("[kebab-name]").unwrap();
+        let s: String = from_str("\"kebab-name\"").unwrap();
         assert_eq!(s, "kebab-name");
+        // Triple-quoted single-word also parses to the same content.
+        let s: String = from_str("\"\"\"hello\"\"\"").unwrap();
+        assert_eq!(s, "hello");
     }
 
     #[test]
     fn bare_in_vec_of_strings() {
-        let text = "<tools-documentation nota nota-serde nexus>";
+        let text = "[tools-documentation nota nota-serde nexus]";
         let v: Vec<String> = from_str(text).unwrap();
         assert_eq!(v, vec!["tools-documentation", "nota", "nota-serde", "nexus"]);
         // Round-trip emits bare too.
@@ -755,17 +774,119 @@ mod bare_strings {
     }
 
     #[test]
-    fn option_string_none_vs_bracketed_none() {
+    fn pascalcase_string_round_trip_bare() {
+        // Per user clarification: PascalCase string round-trips bare.
+        // `"User"` → emits as `User` → deserializes back to String("User").
+        let v = "User".to_string();
+        let text = to_string(&v).unwrap();
+        assert_eq!(text, "User");
+        let back: String = from_str(&text).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn camelcase_string_round_trip_bare() {
+        // Per user clarification: camelCase string round-trips bare.
+        let v = "nexus".to_string();
+        let text = to_string(&v).unwrap();
+        assert_eq!(text, "nexus");
+        let back: String = from_str(&text).unwrap();
+        assert_eq!(back, v);
+
+        let v = "myField".to_string();
+        let text = to_string(&v).unwrap();
+        assert_eq!(text, "myField");
+        let back: String = from_str(&text).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn kebabcase_string_round_trip_bare() {
+        // Per user clarification: kebab-case string round-trips bare.
+        let v = "lojix-schema".to_string();
+        let text = to_string(&v).unwrap();
+        assert_eq!(text, "lojix-schema");
+        let back: String = from_str(&text).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn reserved_keyword_strings_round_trip_quoted() {
+        // Per user clarification: reserved keywords (true, false, None)
+        // never go bare — they always emit quoted to avoid colliding
+        // with the bool / Option::None sentinels.
+        for word in ["true", "false", "None"] {
+            let v = word.to_string();
+            let text = to_string(&v).unwrap();
+            assert_eq!(text, format!("\"{word}\""));
+            let back: String = from_str(&text).unwrap();
+            assert_eq!(back, v, "round-trip failed for reserved word {word:?}");
+        }
+    }
+
+    #[test]
+    fn string_with_spaces_round_trip_quoted() {
+        let v = "hello world".to_string();
+        let text = to_string(&v).unwrap();
+        assert_eq!(text, "\"hello world\"");
+        let back: String = from_str(&text).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn string_with_inner_quote_round_trip() {
+        // String with `"` inside — serializer chooses multiline form
+        // (because contains `"`); content goes raw between `"""`.
+        let v = "say \"hi\"".to_string();
+        let text = to_string(&v).unwrap();
+        // Either escaped-inline `"\"…\""` or multiline `""" … """`
+        // could be valid; current serializer takes multiline.
+        let back: String = from_str(&text).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn string_with_newline_round_trip_multiline() {
+        let v = "line one\nline two".to_string();
+        let text = to_string(&v).unwrap();
+        assert!(text.starts_with("\"\"\""), "expected multiline form, got {text:?}");
+        let back: String = from_str(&text).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn string_starting_with_digit_round_trip_quoted() {
+        // `"42abc"` would parse as int if bare; force quoted.
+        let v = "42abc".to_string();
+        let text = to_string(&v).unwrap();
+        assert_eq!(text, "\"42abc\"");
+        let back: String = from_str(&text).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn single_char_string_round_trip_bare() {
+        // Per spec: `'a'` (char) emits bare as `a`; same for a 1-char
+        // ident-shaped String.
+        let v = "a".to_string();
+        let text = to_string(&v).unwrap();
+        assert_eq!(text, "a");
+        let back: String = from_str(&text).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn option_string_none_vs_quoted_none() {
         // In Option<String>, bare `None` is Option::None.
         let v: Option<String> = from_str("None").unwrap();
         assert_eq!(v, None);
-        // `[None]` inside Option<String> is Some("None").
-        let v: Option<String> = from_str("[None]").unwrap();
+        // `"None"` inside Option<String> is Some("None").
+        let v: Option<String> = from_str("\"None\"").unwrap();
         assert_eq!(v, Some("None".into()));
-        // Round-trip: Some("None") must emit bracketed to avoid
+        // Round-trip: Some("None") must emit quoted to avoid
         // collapsing to Option::None.
         let back = to_string(&Some("None".to_string())).unwrap();
-        assert_eq!(back, "[None]");
+        assert_eq!(back, "\"None\"");
     }
 
     #[test]
@@ -774,20 +895,20 @@ mod bare_strings {
         // the string "None".
         let s: String = from_str("None").unwrap();
         assert_eq!(s, "None");
-        // Round-trip: String "None" must emit bracketed so it won't
+        // Round-trip: String "None" must emit quoted so it won't
         // later be mistaken for Option::None if the field gains
         // Option<> wrapping.
-        assert_eq!(to_string(&"None".to_string()).unwrap(), "[None]");
+        assert_eq!(to_string(&"None".to_string()).unwrap(), "\"None\"");
     }
 
     #[test]
     fn bare_ident_string_round_trip_with_reserved_in_sequence() {
-        // Mix bare, bracketed-because-reserved, and bracketed-because-
+        // Mix bare, quoted-because-reserved, and quoted-because-
         // space in a single Vec<String>. Canonical form preserves the
         // distinction.
         let v = vec!["ok".to_string(), "true".to_string(), "x y".to_string()];
         let text = to_string(&v).unwrap();
-        assert_eq!(text, "<ok [true] [x y]>");
+        assert_eq!(text, "[ok \"true\" \"x y\"]");
         let back: Vec<String> = from_str(&text).unwrap();
         assert_eq!(back, v);
     }
@@ -821,7 +942,7 @@ mod forbidden_attrs {
         }
         let v = Outer { a: 1, inner: Inner { b: 2, c: 3 } };
         let text = to_string(&v).unwrap();
-        assert_eq!(text, "<(a 1) (b 2) (c 3)>");
+        assert_eq!(text, "[(a 1) (b 2) (c 3)]");
     }
 }
 

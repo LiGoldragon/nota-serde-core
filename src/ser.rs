@@ -4,13 +4,18 @@
 //! source-declaration order. Newtype structs wrap: `struct Id(u32)` →
 //! `(Id 42)`. Multi-field unnamed structs (tuple structs with len ≥ 2)
 //! are forbidden — use a named-field struct instead. Maps sort by
-//! serialized key bytes. Floats always contain `.`. Strings are
-//! `[ inline ]` or `[| multiline |]`. Bytes are `#<lowercase-hex>`.
+//! serialized key bytes. Floats always contain `.`. Strings emit as
+//! bare identifiers when ident-shaped, `" inline "` otherwise, or
+//! `""" multiline """` when the content contains `"` or a newline.
+//! Sequences (Vec, tuple, etc.) emit as `[ … ]`. Bytes are
+//! `#<lowercase-hex>`.
 //!
 //! [`Dialect`] selects the grammar. In [`Dialect::Nexus`] the
 //! serializer additionally dispatches on sentinel newtype-struct names
 //! to emit nexus sigils ([`BIND_SENTINEL`] → `@name`,
-//! [`MUTATE_SENTINEL`] → `~value`, [`NEGATE_SENTINEL`] → `!value`).
+//! [`MUTATE_SENTINEL`] → `~value`, [`NEGATE_SENTINEL`] → `!value`,
+//! [`VALIDATE_SENTINEL`] → `?value`, [`SUBSCRIBE_SENTINEL`] → `*value`,
+//! [`ATOMIC_BATCH_SENTINEL`] → `[| items… |]`).
 
 use std::fmt::Write as _;
 
@@ -27,6 +32,14 @@ pub const BIND_SENTINEL: &str = "@NexusBind";
 pub const MUTATE_SENTINEL: &str = "@NexusMutate";
 /// Newtype-struct name dispatching as a nexus negation marker (`!value`).
 pub const NEGATE_SENTINEL: &str = "@NexusNegate";
+/// Newtype-struct name dispatching as a nexus validate marker (`?value`).
+pub const VALIDATE_SENTINEL: &str = "@NexusValidate";
+/// Newtype-struct name dispatching as a nexus subscribe marker (`*value`).
+pub const SUBSCRIBE_SENTINEL: &str = "@NexusSubscribe";
+/// Newtype-struct name dispatching as a nexus atomic batch (`[| items… |]`).
+/// Inner value must serialize as a sequence; the serializer rewrites
+/// the surrounding `[ ]` into `[| |]`.
+pub const ATOMIC_BATCH_SENTINEL: &str = "@NexusAtomicBatch";
 
 pub fn to_string<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     to_string_with(value, Dialect::Nota)
@@ -47,7 +60,7 @@ pub struct Serializer {
     dialect: Dialect,
 }
 
-/// A string value may be emitted bare (without `[ ]`) when its
+/// A string value may be emitted bare (without quotes) when its
 /// content is a non-empty ident-class token (PascalCase / camelCase
 /// / kebab-case) that is not one of the reserved keywords (`true`,
 /// `false`, `None`). This matches what [`crate::lexer`] accepts as
@@ -104,26 +117,43 @@ impl Serializer {
         self.output.push_str(s);
     }
 
+    /// Emit a string literal in canonical form. Bare for ident-shaped
+    /// content; `" "` for short non-ident content; `""" """` for
+    /// content containing `"` or a newline.
     fn write_str_literal(&mut self, v: &str) -> Result<()> {
-        if v.contains("|]") {
-            return Err(Error::StringContainsMultilineCloser);
-        }
         if is_bare_string_eligible(v) {
             self.output.push_str(v);
             return Ok(());
         }
-        let needs_multiline = v.contains(']') || v.contains('\n');
+        let needs_multiline = v.contains('"') || v.contains('\n');
         if needs_multiline {
-            self.output.push_str("[|\n");
+            // `"""` cannot appear in the content, otherwise the
+            // multiline-string closer would match prematurely.
+            if v.contains("\"\"\"") {
+                return Err(Error::StringContainsMultilineCloser);
+            }
+            self.output.push_str("\"\"\"\n");
             self.output.push_str(v);
             if !v.ends_with('\n') {
                 self.output.push('\n');
             }
-            self.output.push_str("|]");
+            self.output.push_str("\"\"\"");
         } else {
-            self.output.push('[');
-            self.output.push_str(v);
-            self.output.push(']');
+            // Inline form. Escape `\` first (so we don't double-escape
+            // the slashes we add for other escapes), then `"`, then
+            // control chars.
+            self.output.push('"');
+            for ch in v.chars() {
+                match ch {
+                    '\\' => self.output.push_str("\\\\"),
+                    '"' => self.output.push_str("\\\""),
+                    '\n' => self.output.push_str("\\n"),
+                    '\t' => self.output.push_str("\\t"),
+                    '\r' => self.output.push_str("\\r"),
+                    other => self.output.push(other),
+                }
+            }
+            self.output.push('"');
         }
         Ok(())
     }
@@ -142,9 +172,12 @@ impl Serializer {
         value.serialize(&mut sub)?;
         let s = sub.output;
         // Inner may come through bare (canonical for ident-shaped
-        // strings) or `[name]` (bracketed form). Strip the brackets
-        // if present so validation sees just the content.
-        let inner = if s.starts_with('[') && s.ends_with(']') && s.len() >= 2 {
+        // strings) or `"name"` (quoted form). Strip the quotes if
+        // present so validation sees just the content.
+        let inner = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+            // Strip surrounding `"` and unescape — bind names are
+            // ident-only so escapes are irrelevant in practice, but
+            // be defensive.
             &s[1..s.len() - 1]
         } else {
             s.as_str()
@@ -156,6 +189,29 @@ impl Serializer {
         }
         self.output.push('@');
         self.output.push_str(inner);
+        Ok(())
+    }
+
+    /// Serialize an atomic-batch value. The inner value is expected to
+    /// serialize as a sequence (`[ … ]`); the serializer rewrites the
+    /// surrounding `[ ]` into `[| |]`.
+    fn serialize_atomic_batch<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
+        let mut sub = Serializer::with_dialect(self.dialect);
+        value.serialize(&mut sub)?;
+        let s = sub.output;
+        if !(s.starts_with('[') && s.ends_with(']')) {
+            return Err(Error::Custom(format!(
+                "AtomicBatch inner must serialize as a sequence `[ … ]`, got {s:?}"
+            )));
+        }
+        let inner = &s[1..s.len() - 1];
+        self.output.push_str("[|");
+        if !inner.is_empty() {
+            self.output.push(' ');
+            self.output.push_str(inner);
+            self.output.push(' ');
+        }
+        self.output.push_str("|]");
         Ok(())
     }
 
@@ -262,7 +318,15 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         name: &'static str,
         value: &T,
     ) -> Result<()> {
-        if matches!(name, BIND_SENTINEL | MUTATE_SENTINEL | NEGATE_SENTINEL) {
+        if matches!(
+            name,
+            BIND_SENTINEL
+                | MUTATE_SENTINEL
+                | NEGATE_SENTINEL
+                | VALIDATE_SENTINEL
+                | SUBSCRIBE_SENTINEL
+                | ATOMIC_BATCH_SENTINEL
+        ) {
             if self.dialect != Dialect::Nexus {
                 return self.reject_sentinel_in_nota(name);
             }
@@ -276,6 +340,15 @@ impl<'a> ser::Serializer for &'a mut Serializer {
                     self.output.push('!');
                     value.serialize(self)
                 }
+                VALIDATE_SENTINEL => {
+                    self.output.push('?');
+                    value.serialize(self)
+                }
+                SUBSCRIBE_SENTINEL => {
+                    self.output.push('*');
+                    value.serialize(self)
+                }
+                ATOMIC_BATCH_SENTINEL => self.serialize_atomic_batch(value),
                 _ => unreachable!(),
             };
         }
@@ -303,12 +376,12 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq> {
-        self.output.push('<');
+        self.output.push('[');
         Ok(SeqSerializer { ser: self, first: true })
     }
 
     fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple> {
-        self.output.push('<');
+        self.output.push('[');
         Ok(SeqSerializer { ser: self, first: true })
     }
 
@@ -384,7 +457,7 @@ impl<'a> SeqSerializer<'a> {
     }
 
     fn close(self) {
-        self.ser.output.push('>');
+        self.ser.output.push(']');
     }
 }
 
@@ -490,7 +563,7 @@ impl<'a> ser::SerializeMap for MapSerializer<'a> {
 
     fn end(mut self) -> Result<()> {
         self.entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-        self.ser.output.push('<');
+        self.ser.output.push('[');
         let mut first = true;
         for (k, v) in &self.entries {
             if !first { self.ser.output.push(' '); }
@@ -501,7 +574,7 @@ impl<'a> ser::SerializeMap for MapSerializer<'a> {
             self.ser.output.push_str(v);
             self.ser.output.push(')');
         }
-        self.ser.output.push('>');
+        self.ser.output.push(']');
         Ok(())
     }
 }

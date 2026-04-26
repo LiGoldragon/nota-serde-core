@@ -5,12 +5,18 @@
 //! classify a token.
 //!
 //! [`Dialect`] selects the grammar. `Dialect::Nota` accepts only nota's
-//! four delimiter pairs and two sigils. `Dialect::Nexus` additionally
-//! accepts the nexus superset: three additional delimiter pairs
-//! (`(| |)` patterns, `{| |}` constraints, `{ }` shapes) plus the
-//! three sigils `~`, `@`, `!` and the `=` bind-alias token. See
+//! two delimiter pairs (`( )` records, `[ ]` sequences), two string
+//! forms (`" "` inline, `""" """` multiline), and two sigils (`;;`,
+//! `#`). `Dialect::Nexus` additionally accepts the messaging superset:
+//! four extra delimiter pairs (`(| |)` patterns, `[| |]` atomic
+//! batches, `{ }` shapes, `{| |}` constraints) plus the five sigils
+//! `~`, `!`, `?`, `*`, `@` and the `=` bind-alias token. See
 //! [nexus/spec/grammar.md](https://github.com/LiGoldragon/nexus/blob/main/spec/grammar.md)
-//! for the locked v3 token table.
+//! for the locked token table.
+//!
+//! Reserved tokens — `<`, `>`, `<=`, `>=`, `!=`, and `=` outside the
+//! `@a=@b` bind-alias position — are reserved for future comparison
+//! operator design; the lexer rejects them in both dialects.
 
 use crate::error::{Error, Result};
 
@@ -28,12 +34,12 @@ pub enum Dialect {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Shared with both dialects.
-    LParen,       // (
-    RParen,       // )
-    LAngle,       // <
-    RAngle,       // >
-    Equals,       // =
-    Colon,        // :
+    LParen,    // (
+    RParen,    // )
+    LBracket,  // [
+    RBracket,  // ]
+    Equals,    // =
+    Colon,     // :
     Bool(bool),
     /// Signed integer literal. Fits in `[i128::MIN, i128::MAX]`.
     Int(i128),
@@ -53,12 +59,16 @@ pub enum Token {
     Tilde,        // ~ (mutate prefix)
     At,           // @ (bind prefix)
     Bang,         // ! (negate prefix)
+    Question,     // ? (validate prefix)
+    Star,         // * (subscribe prefix)
     LBrace,       // { (shape open)
     RBrace,       // } (shape close)
     LBracePipe,   // {| (constrain open)
     RBracePipe,   // |} (constrain close)
     LParenPipe,   // (| (pattern open)
     RParenPipe,   // |) (pattern close)
+    LBracketPipe, // [| (atomic batch open)
+    RBracketPipe, // |] (atomic batch close)
 }
 
 pub struct Lexer<'a> {
@@ -90,13 +100,8 @@ impl<'a> Lexer<'a> {
         self.input.as_bytes().get(self.pos).copied()
     }
 
-    fn peek2_bytes(&self) -> Option<(u8, u8)> {
-        let b = self.input.as_bytes();
-        if self.pos + 1 < b.len() {
-            Some((b[self.pos], b[self.pos + 1]))
-        } else {
-            None
-        }
+    fn peek_byte_at(&self, offset: usize) -> Option<u8> {
+        self.input.as_bytes().get(self.pos + offset).copied()
     }
 
     fn skip_whitespace_and_comments(&mut self) {
@@ -121,21 +126,15 @@ impl<'a> Lexer<'a> {
         match b {
             b'(' => Ok(Some(self.read_left_paren())),
             b')' => { self.pos += 1; Ok(Some(Token::RParen)) }
-            b'<' => Ok(Some(self.read_left_angle())),
-            b'>' => { self.pos += 1; Ok(Some(Token::RAngle)) }
+            b'[' => Ok(Some(self.read_left_bracket())),
+            b']' => { self.pos += 1; Ok(Some(Token::RBracket)) }
+            b'<' | b'>' => Err(Error::Custom(format!(
+                "reserved token {:?} at byte offset {} — `<` `>` `<=` `>=` `!=` are reserved for comparison operators (design pending)",
+                b as char, self.pos,
+            ))),
             b'=' => { self.pos += 1; Ok(Some(Token::Equals)) }
             b':' => { self.pos += 1; Ok(Some(Token::Colon)) }
-            b'[' => {
-                self.pos += 1;
-                if self.peek_byte() == Some(b'|') {
-                    self.pos += 1;
-                    let s = self.read_multiline_string()?;
-                    Ok(Some(Token::Str(s)))
-                } else {
-                    let s = self.read_inline_string()?;
-                    Ok(Some(Token::Str(s)))
-                }
-            }
+            b'"' => Ok(Some(self.read_string()?)),
             b'#' => {
                 self.pos += 1;
                 let bytes = self.read_bytes()?;
@@ -150,6 +149,8 @@ impl<'a> Lexer<'a> {
             b'~' if self.dialect == Dialect::Nexus => { self.pos += 1; Ok(Some(Token::Tilde)) }
             b'@' if self.dialect == Dialect::Nexus => { self.pos += 1; Ok(Some(Token::At)) }
             b'!' if self.dialect == Dialect::Nexus => { self.pos += 1; Ok(Some(Token::Bang)) }
+            b'?' if self.dialect == Dialect::Nexus => { self.pos += 1; Ok(Some(Token::Question)) }
+            b'*' if self.dialect == Dialect::Nexus => { self.pos += 1; Ok(Some(Token::Star)) }
 
             _ if is_ident_start(b) => {
                 let ident = self.read_ident();
@@ -177,6 +178,16 @@ impl<'a> Lexer<'a> {
         Token::LParenPipe
     }
 
+    /// `[` → `LBracket`, `[|` → `LBracketPipe` (nexus-only).
+    fn read_left_bracket(&mut self) -> Token {
+        self.pos += 1;
+        if self.dialect != Dialect::Nexus || self.peek_byte() != Some(b'|') {
+            return Token::LBracket;
+        }
+        self.pos += 1;
+        Token::LBracketPipe
+    }
+
     /// `{` → `LBrace`, `{|` → `LBracePipe`. Nexus-only; caller gates
     /// dialect.
     fn read_left_brace(&mut self) -> Token {
@@ -188,58 +199,118 @@ impl<'a> Lexer<'a> {
         Token::LBracePipe
     }
 
-    /// `<` → `LAngle`. The `<|` form is not in v3 nexus — angles only
-    /// open sequences.
-    fn read_left_angle(&mut self) -> Token {
-        self.pos += 1;
-        Token::LAngle
-    }
-
     /// Decode a leading `|` into its closing-pair token. Nexus-only.
-    /// Closers: `|)` for patterns, `|}` for constraints.
+    /// Closers: `|)` for patterns, `|}` for constraints, `|]` for
+    /// atomic batches.
     fn read_pipe_close(&mut self) -> Result<Token> {
         self.pos += 1;
         match self.peek_byte() {
             Some(b')') => { self.pos += 1; Ok(Token::RParenPipe) }
             Some(b'}') => { self.pos += 1; Ok(Token::RBracePipe) }
+            Some(b']') => { self.pos += 1; Ok(Token::RBracketPipe) }
             Some(other) => Err(Error::Custom(format!(
-                "unexpected `|` followed by {:?} — expected `|)` or `|}}`",
+                "unexpected `|` followed by {:?} — expected `|)`, `|}}`, or `|]`",
                 other as char
             ))),
             None => Err(Error::Custom("unexpected `|` at end of input".into())),
         }
     }
 
-    fn read_inline_string(&mut self) -> Result<String> {
-        let start = self.pos;
-        while let Some(b) = self.peek_byte() {
-            if b == b']' {
-                let s = self.input[start..self.pos].to_string();
-                self.pos += 1;
-                return Ok(s);
-            }
-            if b == b'\n' {
-                return Err(Error::Custom(
-                    "unexpected newline in inline `[ ]` string — use `[| |]` for multiline".into(),
-                ));
-            }
+    /// Read a quoted string. `"` → inline; `"""` → multiline. Caller
+    /// has positioned `self.pos` at the opening `"`.
+    fn read_string(&mut self) -> Result<Token> {
+        // Detect triple-quote.
+        if self.peek_byte_at(1) == Some(b'"') && self.peek_byte_at(2) == Some(b'"') {
+            self.pos += 3;
+            self.read_multiline_string().map(Token::Str)
+        } else {
             self.pos += 1;
+            self.read_inline_string().map(Token::Str)
         }
-        Err(Error::Custom("unterminated inline string — missing `]`".into()))
     }
 
+    /// Read an inline `" "` string. Pos is past the opening quote.
+    /// Supports `\\`, `\"`, `\n`, `\t`, `\r` escapes; rejects bare
+    /// newlines (use `""" """` for multiline content).
+    fn read_inline_string(&mut self) -> Result<String> {
+        let mut out = String::new();
+        loop {
+            let Some(b) = self.peek_byte() else {
+                return Err(Error::Custom("unterminated inline string — missing `\"`".into()));
+            };
+            match b {
+                b'"' => {
+                    self.pos += 1;
+                    return Ok(out);
+                }
+                b'\n' => {
+                    return Err(Error::Custom(
+                        "unexpected newline in inline `\" \"` string — use `\"\"\" \"\"\"` for multiline".into(),
+                    ));
+                }
+                b'\\' => {
+                    let Some(esc) = self.peek_byte_at(1) else {
+                        return Err(Error::Custom("unterminated escape at end of input".into()));
+                    };
+                    let translated = match esc {
+                        b'\\' => '\\',
+                        b'"' => '"',
+                        b'n' => '\n',
+                        b't' => '\t',
+                        b'r' => '\r',
+                        other => return Err(Error::Custom(format!(
+                            "unknown escape `\\{}` in inline string — supported: `\\\\`, `\\\"`, `\\n`, `\\t`, `\\r`",
+                            other as char
+                        ))),
+                    };
+                    out.push(translated);
+                    self.pos += 2;
+                }
+                _ => {
+                    // Read one UTF-8 codepoint to avoid splitting a
+                    // multi-byte char.
+                    let ch_start = self.pos;
+                    let ch_len = utf8_char_len(b);
+                    if ch_len > 1 {
+                        // Bounds-check + push the whole char.
+                        if self.pos + ch_len > self.input.len() {
+                            return Err(Error::Custom(
+                                "truncated UTF-8 sequence in inline string".into(),
+                            ));
+                        }
+                        let s = &self.input[ch_start..ch_start + ch_len];
+                        out.push_str(s);
+                        self.pos += ch_len;
+                    } else {
+                        out.push(b as char);
+                        self.pos += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Read a multiline `""" """` string. Pos is past the opening
+    /// triple-quote. Contents are verbatim (no escape processing) and
+    /// auto-dedented (strip common leading-whitespace prefix).
     fn read_multiline_string(&mut self) -> Result<String> {
-        // Consume up to `|]`. Content starts right after `[|`.
         let start = self.pos;
-        while let Some((a, b)) = self.peek2_bytes() {
-            if a == b'|' && b == b']' {
+        loop {
+            let Some(b) = self.peek_byte() else {
+                return Err(Error::Custom(
+                    "unterminated multiline string — missing `\"\"\"`".into(),
+                ));
+            };
+            if b == b'"'
+                && self.peek_byte_at(1) == Some(b'"')
+                && self.peek_byte_at(2) == Some(b'"')
+            {
                 let raw = &self.input[start..self.pos];
-                self.pos += 2;
+                self.pos += 3;
                 return Ok(dedent(raw));
             }
             self.pos += 1;
         }
-        Err(Error::Custom("unterminated multiline string — missing `|]`".into()))
     }
 
     fn read_bytes(&mut self) -> Result<Vec<u8>> {
@@ -365,6 +436,20 @@ fn hex_digit(b: u8) -> Option<u8> {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),
         _ => None,
+    }
+}
+
+/// Number of bytes in the UTF-8 encoding starting with this leading
+/// byte. Returns 1 for ASCII (also for invalid leading bytes — caller
+/// re-checks bounds and `from_utf8` defers to the str slice for
+/// validation).
+fn utf8_char_len(b: u8) -> usize {
+    match b {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
     }
 }
 

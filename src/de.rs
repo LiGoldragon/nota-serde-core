@@ -15,7 +15,7 @@ use serde::de::{
 };
 
 use crate::error::{Error, Result};
-use crate::lexer::{Dialect, Lexer, Token};
+use crate::lexer::{is_pascal_case, Dialect, Lexer, Token};
 use crate::ser::{
     ATOMIC_BATCH_SENTINEL, BIND_SENTINEL, MUTATE_SENTINEL, NEGATE_SENTINEL,
     SUBSCRIBE_SENTINEL, VALIDATE_SENTINEL,
@@ -78,6 +78,27 @@ impl<'a> TokenStream<'a> {
             Ok(())
         } else {
             Err(Error::Custom(format!("expected {expected:?}, got {got:?}")))
+        }
+    }
+
+    /// Consume the next token as a PascalCase ident (used for record /
+    /// unit struct / variant heads). Returns the ident string. Rejects
+    /// non-ident tokens and ident tokens whose first char is not ASCII
+    /// uppercase. `kind` describes the position for the error message
+    /// (`"struct"`, `"unit struct"`, `"newtype"`, `"variant"`).
+    fn expect_pascal_head(&mut self, kind: &'static str) -> Result<String> {
+        match self.expect_next()? {
+            Token::Ident(s) => {
+                if !is_pascal_case(&s) {
+                    return Err(Error::Custom(format!(
+                        "{kind} name must be PascalCase (first char uppercase ASCII); got `{s}`. Type and variant names follow PascalCase; bare lowercase identifiers in head position are forbidden."
+                    )));
+                }
+                Ok(s)
+            }
+            other => Err(Error::Custom(format!(
+                "expected {kind} name (PascalCase identifier), got {other:?}"
+            ))),
         }
     }
 }
@@ -259,10 +280,11 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         name: &'static str,
         visitor: V,
     ) -> Result<V::Value> {
-        match self.stream.expect_next()? {
-            Token::Ident(s) if s == name => visitor.visit_unit(),
-            other => Err(Error::Custom(format!("expected unit struct `{name}`, got {other:?}"))),
+        let head = self.stream.expect_pascal_head("unit struct")?;
+        if head != name {
+            return Err(Error::Custom(format!("expected unit struct `{name}`, got `{head}`")));
         }
+        visitor.visit_unit()
     }
 
     fn deserialize_newtype_struct<V: Visitor<'de>>(
@@ -325,11 +347,11 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         }
         // Plain newtype — `(Name value)`.
         self.stream.expect_matching(&Token::LParen)?;
-        match self.stream.expect_next()? {
-            Token::Ident(s) if s == name => {}
-            other => return Err(Error::Custom(format!(
-                "expected newtype struct `{name}`, got {other:?}"
-            ))),
+        let head = self.stream.expect_pascal_head("newtype")?;
+        if head != name {
+            return Err(Error::Custom(format!(
+                "expected newtype struct `{name}`, got `{head}`"
+            )));
         }
         let value = visitor.visit_newtype_struct(&mut *self)?;
         self.stream.expect_matching(&Token::RParen)?;
@@ -374,9 +396,9 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         // visit_seq (positional) and visit_map (named); we drive it
         // through visit_seq.
         self.stream.expect_matching(&Token::LParen)?;
-        match self.stream.expect_next()? {
-            Token::Ident(s) if s == name => {}
-            other => return Err(Error::Custom(format!("expected struct `{name}`, got {other:?}"))),
+        let head = self.stream.expect_pascal_head("struct")?;
+        if head != name {
+            return Err(Error::Custom(format!("expected struct `{name}`, got `{head}`")));
         }
         let value = visitor.visit_seq(PositionalArgs { de: self })?;
         self.stream.expect_matching(&Token::RParen)?;
@@ -500,10 +522,7 @@ impl<'a, 'de> EnumAccess<'de> for UnitVariant<'a, 'de> {
     type Variant = UnitVariantAccess;
 
     fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self::Variant)> {
-        let name = match self.de.stream.expect_next()? {
-            Token::Ident(s) => s,
-            other => return Err(Error::Custom(format!("expected variant name, got {other:?}"))),
-        };
+        let name = self.de.stream.expect_pascal_head("variant")?;
         let v = seed.deserialize(name.into_deserializer())?;
         Ok((v, UnitVariantAccess))
     }
@@ -538,10 +557,7 @@ impl<'a, 'de> EnumAccess<'de> for PayloadVariant<'a, 'de> {
     type Variant = PayloadVariantAccess<'a, 'de>;
 
     fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self::Variant)> {
-        let name = match self.de.stream.expect_next()? {
-            Token::Ident(s) => s,
-            other => return Err(Error::Custom(format!("expected variant name, got {other:?}"))),
-        };
+        let name = self.de.stream.expect_pascal_head("variant")?;
         let v = seed.deserialize(name.into_deserializer())?;
         Ok((v, PayloadVariantAccess { de: self.de }))
     }

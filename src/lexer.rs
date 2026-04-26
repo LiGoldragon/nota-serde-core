@@ -422,6 +422,22 @@ fn is_ident_continue(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
+/// True when `s` is PascalCase: non-empty and first char ASCII uppercase.
+///
+/// Type and variant names — the head identifier in a record `(Foo …)`,
+/// a unit struct `Foo`, or an enum variant `Active` / `(Sized w h)` —
+/// must satisfy this rule. The deserializer rejects head identifiers
+/// that fail it, so a bare lowercase token in head position becomes a
+/// parse-time error rather than a late "type not found" error.
+///
+/// Bare-identifier strings in *value* position are unaffected — every
+/// ident-class token (PascalCase, camelCase, kebab-case) remains a
+/// valid bare string when the schema expects `String` at that
+/// position.
+pub fn is_pascal_case(s: &str) -> bool {
+    matches!(s.chars().next(), Some(c) if c.is_ascii_uppercase())
+}
+
 fn is_radix_digit(b: u8, radix: u32) -> bool {
     match radix {
         2 => matches!(b, b'0' | b'1'),

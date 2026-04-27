@@ -8,9 +8,9 @@ by:
   public façade for nota text.
 - [nexus-serde](https://github.com/LiGoldragon/nexus-serde) —
   the public façade for nexus text.
-- [nexusd](https://github.com/LiGoldragon/nexusd) — parses
-  incoming nexus text at `Dialect::Nexus` to build signal
-  frames.
+- [nexus](https://github.com/LiGoldragon/nexus) — the daemon;
+  parses incoming nexus text at `Dialect::Nexus` to build
+  signal frames.
 
 This crate is the **internal kernel**. End users link
 `nota-serde` or `nexus-serde`, never this directly.

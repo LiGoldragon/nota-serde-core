@@ -915,6 +915,51 @@ mod bare_strings {
 }
 
 // ---------------------------------------------------------------------------
+// Transparent newtypes — primitive newtypes with `#[serde(transparent)]`
+// emit and accept the bare inner form. The schema position carries the
+// type. Non-transparent newtypes still wrap.
+
+mod transparent_newtypes {
+    use super::*;
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+    #[serde(transparent)]
+    struct SlotId(u64);
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+    struct WrappedTag(u64);
+
+    #[test]
+    fn transparent_newtype_emits_bare() {
+        assert_eq!(to_string(&SlotId(100)).unwrap(), "100");
+    }
+
+    #[test]
+    fn transparent_newtype_parses_bare() {
+        let s: SlotId = from_str("100").unwrap();
+        assert_eq!(s, SlotId(100));
+    }
+
+    #[test]
+    fn transparent_newtype_in_struct_position() {
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct Edge { from: SlotId, to: SlotId, weight: u32 }
+        let e = Edge { from: SlotId(100), to: SlotId(101), weight: 5 };
+        assert_eq!(to_string(&e).unwrap(), "(Edge 100 101 5)");
+        let back: Edge = from_str("(Edge 100 101 5)").unwrap();
+        assert_eq!(back, e);
+    }
+
+    #[test]
+    fn non_transparent_newtype_still_wraps() {
+        // Default newtype path is unchanged: wrapped form is canonical.
+        assert_eq!(to_string(&WrappedTag(42)).unwrap(), "(WrappedTag 42)");
+        let back: WrappedTag = from_str("(WrappedTag 42)").unwrap();
+        assert_eq!(back, WrappedTag(42));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Forbidden serde attrs — documents what happens when a user reaches for
 // features the positional-records design doesn't support.
 

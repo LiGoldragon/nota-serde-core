@@ -438,6 +438,17 @@ pub fn is_pascal_case(s: &str) -> bool {
     matches!(s.chars().next(), Some(c) if c.is_ascii_uppercase())
 }
 
+/// True when `s` is camelCase or kebab-case: non-empty and first char
+/// is ASCII lowercase or `_`. Used for bind names (`@from` in nexus
+/// patterns) and field-name positions where PascalCase is reserved
+/// for type/variant names.
+///
+/// `_` as the leading character counts as lowercase per the nota
+/// identifier-class rules (`_foo` is camelCase-kindred).
+pub fn is_lowercase_identifier(s: &str) -> bool {
+    matches!(s.chars().next(), Some(c) if c.is_ascii_lowercase() || c == '_')
+}
+
 fn is_radix_digit(b: u8, radix: u32) -> bool {
     match radix {
         2 => matches!(b, b'0' | b'1'),

@@ -47,7 +47,7 @@ pub mod ser;
 
 pub use de::{from_str, from_str_nexus, from_str_with, Deserializer};
 pub use error::{Error, Result};
-pub use lexer::{is_pascal_case, Dialect, Lexer, Token};
+pub use lexer::{is_lowercase_identifier, is_pascal_case, Dialect, Lexer, Token};
 pub use ser::{
     to_string, to_string_nexus, to_string_with, Serializer,
     ATOMIC_BATCH_SENTINEL, BIND_SENTINEL, MUTATE_SENTINEL, NEGATE_SENTINEL,
